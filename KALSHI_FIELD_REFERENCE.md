@@ -195,3 +195,56 @@ If a player in a combo DNPs:
 - Daytime (6+ hrs before tip): quotes available but NO-only, yes_c=0
 - Pre-game (T-2hr): test whether yes_c starts appearing
 - Live game: markets close as props trigger
+
+---
+
+## BUYING NO — Complete Research Log (Will Not Fail)
+
+### Status: IN PROGRESS — pathway confirmed, timing is the blocker
+
+### What We Know For Certain
+1. **Combo markets ARE full binary markets** — each has its own orderbook, YES and NO sides
+2. **Our 38 confirmed NO fills are real** — `taker=no` in trades history, `position_fp` negative
+3. **The fills happened at 01:04-05:17 UTC** — ~6-10 hours before tip (8pm ET)
+4. **Mechanism: market maker posted YES limit orders, we hit from NO side**
+5. **Trade data confirms:** `taker=no, yes_price=0.513, no_price=0.487, count=5`
+6. **active_quoters field** in multivariate_event_collections shows when MMs are live
+
+### The active_quoters Signal
+- `GET /trade-api/v2/multivariate_event_collections` returns collections with `active_quoters` per event
+- When `active_quoters: []` → market makers offline → orderbooks empty → NO fills impossible
+- When `active_quoters: [uuid]` → market maker online → submit RFQ → YES orders appear → hit NO
+- Active window appears to be ~T-2hr to tip time for NBA props
+
+### The Exact Flow That Produced NO Fills
+1. combo_scheduler submitted RFQs every cycle
+2. Market maker received RFQ, posted YES limit order on combo market orderbook
+3. Bot placed NO buy limit order at YES ask price (1 - yes_bid)
+4. Orders matched → we hold NO (position_fp negative) → win if any leg misses
+5. Orderbook clears after fill — looks empty in hindsight
+
+### Why It Doesn't Work Right Now
+- active_quoters = [] on all NBA collections (games 6+ hours away)
+- RFQ gets a bilateral quote response but no orderbook posting
+- Direct limit NO orders rest unfilled (no counterparty)
+
+### The Path Forward
+- Monitor `active_quoters` field on NBA collections
+- When non-empty: submit RFQ → immediately check orderbook for YES orders → place NO buy
+- Target: 2-3 leg combos where YES is 50-70¢ (NO costs 30-50¢, pays 2-3x)
+- Window: T-120min to T-30min before tip (~midnight-2am UTC for 8pm ET games)
+- Optimal legs: high yes_ask_size (500+) + model confidence + smart money YES buying
+
+### Why More Legs ≠ Better NO Payout
+- Market maker prices combo NO at fair value regardless of leg count
+- 10-leg NO at 98¢ costs 2¢ → win 2¢ profit = bad
+- 2-leg NO at 50¢ costs 50¢ → win 100¢ = 2x = decent
+- Sweet spot: 2-4 legs where YES probability is 40-70% per leg
+- Combined YES prob = 0.55^2 = 30% → NO = 70% → NO costs ~30¢ → win $1 = 3.3x
+
+### Scheduled Implementation
+- Add active_quoters polling to combo_scheduler
+- When quoters detected: run NO buyer scan
+- Place NO limit orders at YES ask price (from orderbook after RFQ activation)
+- Cancel unfilled orders after 60 seconds
+- Target: 2-3 NBA same-game combos per slate, $1-2 each
