@@ -358,7 +358,7 @@ def run_bot():
             except Exception:
                 live_exposure = reconciler.get_total_exposure()
 
-            MAX_PROP_POSITIONS = 6   # Conservative until games are closer
+            MAX_PROP_POSITIONS = 40  # Combos only — no single prop limit needed
             if live_exposure >= MAX_PROP_POSITIONS:
                 log.info(f"[Bot] At position limit ({live_exposure}/{MAX_PROP_POSITIONS} exposure)")
             else:

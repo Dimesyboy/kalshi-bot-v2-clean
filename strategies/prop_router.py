@@ -68,6 +68,8 @@ class PropRouterStrategy(BaseStrategy):
         price_history: list,
         context: Optional[dict] = None,
     ) -> Optional[TradeSignal]:
+        # DISABLED — single props 1W/84L, all flow to combo scanner
+        return None
 
         ticker = market.ticker
         series = ticker.split('-')[0]
