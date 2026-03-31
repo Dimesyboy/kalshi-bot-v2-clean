@@ -114,6 +114,28 @@ def run_advanced_fetch():
         log.warning(f"Advanced fetch failed: {e}")
 
 
+def run_snapshot_if_due():
+    """Run market snapshot every 30 minutes."""
+    import sqlite3
+    from datetime import datetime, timezone, timedelta
+    try:
+        conn = sqlite3.connect('/root/kalshi-bot-v2/data/cache.db')
+        last = conn.execute(
+            "SELECT MAX(snapshot_time) FROM market_snapshots"
+        ).fetchone()[0]
+        conn.close()
+        if last:
+            last_dt = datetime.fromisoformat(last).replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last_dt < timedelta(minutes=30):
+                return False
+    except Exception:
+        pass
+    log.info("[Scheduler] Running market snapshot...")
+    from data.market_snapshot import run_snapshot
+    run_snapshot()
+    return True
+
+
 def main():
     log.info("Combo Scheduler starting")
     warm_cache()

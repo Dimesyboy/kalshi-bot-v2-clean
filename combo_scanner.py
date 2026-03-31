@@ -717,10 +717,31 @@ HC_MIN_PAYOUT        = 2.0     # Low payout floor, we want hit rate
 
 def scan_all_props() -> list[ComboLeg]:
     """
-    Scan all NBA prop markets using threshold optimizer as primary source.
-    For each player+stat, finds the threshold with maximum model edge.
-    Falls back to prop_scanner if optimizer returns nothing.
+    Scan all NBA prop markets using market snapshot signals as primary source.
+    Combines model edge + orderbook + trade flow + smart money signals.
+    Falls back to threshold optimizer, then prop_scanner.
     """
+    # Primary: market snapshot composite scoring
+    try:
+        from data.market_snapshot import get_best_combo_legs
+        signal_legs = get_best_combo_legs(min_ask_size=300, min_edge=0.05)
+        if len(signal_legs) >= 5:
+            combo_legs = []
+            for leg in signal_legs:
+                combo_legs.append(ComboLeg(
+                    ticker            = leg['ticker'],
+                    collection_ticker = 'KXMVESPORTSMULTIGAMEEXTENDED-R',
+                    confidence        = leg['confidence'],
+                    implied_prob      = leg['yes_bid'],
+                    is_yes_only       = True,
+                    reasoning         = leg['reasoning'],
+                ))
+            log.info(f"[Combo] {len(combo_legs)} legs (market snapshot signals)")
+            return combo_legs
+    except Exception as e:
+        log.warning(f"[Combo] Snapshot scanner failed: {e}, falling back")
+
+    # Fallback 1: threshold optimizer
     try:
         from data.threshold_optimizer import find_optimal_legs, to_combo_legs
         optimal = find_optimal_legs()
@@ -731,7 +752,7 @@ def scan_all_props() -> list[ComboLeg]:
     except Exception as e:
         log.warning(f"[Combo] Threshold optimizer failed: {e}, falling back")
 
-    # Fallback to prop_scanner
+    # Fallback 2: prop_scanner
     from data.prop_scanner import scan_edges
     edge_legs = scan_edges()
     combo_legs = []
