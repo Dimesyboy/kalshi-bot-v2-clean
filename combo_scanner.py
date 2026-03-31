@@ -251,6 +251,185 @@ def build_combo(collection: dict) -> Optional[ComboCandidate]:
 
 # ── RFQ submission ─────────────────────────────────────────────────────────
 
+def build_fade_combo(legs: list, max_legs: int = 8) -> 'ComboCandidate | None':
+    """
+    Build a NO combo from high-priced YES legs.
+    Strategy: find legs where YES is expensive (80-95c) — NO is cheap (5-20c).
+    Win if ANY single leg misses. One miss pays the whole combo.
+    
+    Best legs: high market confidence (80-92c YES) with real statistical basis.
+    Avoid: legs above 95c (basically certain), below 75c (NO too expensive).
+    """
+    collection = 'KXMVESPORTSMULTIGAMEEXTENDED-R'
+
+    # Filter to high-priced YES legs only
+    fade_legs = [l for l in legs if 0.75 <= l.implied_prob <= 0.93]
+
+    if len(fade_legs) < 2:
+        log.info("[Combo] Not enough high-priced legs for fade combo")
+        return None
+
+    # Dedup by player — best (highest YES price = cheapest NO) per player
+    seen = {}
+    for leg in fade_legs:
+        player = leg.reasoning.split(' avg')[0] if ' avg' in leg.reasoning else leg.ticker
+        if player not in seen or leg.implied_prob > seen[player].implied_prob:
+            seen[player] = leg
+    unique = list(seen.values())
+
+    # Sort by YES price descending (cheapest NO first)
+    unique.sort(key=lambda x: x.implied_prob, reverse=True)
+    selected = unique[:max_legs]
+
+    if len(selected) < 2:
+        return None
+
+    candidate = ComboCandidate(collection, selected)
+
+    # Calculate NO win probability and payout
+    # P(NO wins) = 1 - P(all YES hit) = 1 - combined_confidence
+    no_win_prob = 1.0 - candidate.combined_confidence
+    # NO cost per contract = product of (1 - yes_bid) for each leg
+    no_cost = 1.0
+    for l in selected: no_cost *= (1.0 - l.implied_prob)
+    no_payout = round(1.0 / no_cost, 1) if no_cost > 0 else 0
+
+    log.info(f"[Combo] FADE: {len(selected)} legs NO_win={no_win_prob*100:.1f}% "
+             f"NO_payout={no_payout:.0f}x")
+    for l in selected:
+        player = l.reasoning.split(' avg')[0]
+        log.info(f"[Combo]   {player:25} YES={l.implied_prob:.2f} NO={1-l.implied_prob:.2f}")
+
+    return candidate
+
+
+def get_rfq_quote(candidate: ComboCandidate, stake_dollars: float = 5.0) -> dict | None:
+    """
+    Submit RFQ and return the best quote WITHOUT accepting it.
+    Used for preview — call accept_quote() separately to confirm.
+    Returns dict with _best_side, _best_payout, _best_cost, id fields.
+    """
+    # Reuse submit_rfq logic but stop before accept
+    # We'll call the internal steps directly
+    import re as _re
+    user_id = config.KALSHI_USER_ID
+    BASE    = "https://api.elections.kalshi.com"
+
+    def _event_ticker(t):
+        m = _re.match(r'(KXNBA[A-Z0-9]+-[0-9]{2}[A-Z]{3}\d{2}[A-Z]+)', t)
+        return m.group(1) if m else t.rsplit('-', 2)[0]
+
+    try:
+        selected = [{"market_ticker": l.ticker, "event_ticker": _event_ticker(l.ticker), "side": "yes"}
+                    for l in candidate.legs]
+        cp = '/trade-api/v2/multivariate_event_collections/KXMVESPORTSMULTIGAMEEXTENDED-R'
+        rc = requests.post(f"{BASE}{cp}", headers=_pss_headers("POST", cp),
+                          json={"selected_markets": selected, "with_market_payload": True}, timeout=8)
+        rc.raise_for_status()
+        market_ticker = rc.json().get("market_ticker")
+    except Exception as e:
+        log.warning(f"[Combo] get_rfq_quote collection failed: {e}")
+        return None
+
+    try:
+        rfq_body = {
+            "market_ticker":         market_ticker,
+            "mve_collection_ticker": "KXMVESPORTSMULTIGAMEEXTENDED-R",
+            "target_cost_dollars":   f"{stake_dollars:.2f}",
+            "rest_remainder":        False,
+            "replace_existing":      True,
+            "mve_selected_legs":     [{"market_ticker": l.ticker, "side": "yes"} for l in candidate.legs],
+        }
+        rfq    = _signed_post('/trade-api/v2/communications/rfqs', rfq_body)
+        rfq_id = rfq.get('id')
+    except Exception as e:
+        log.warning(f"[Combo] get_rfq_quote RFQ failed: {e}")
+        return None
+
+    # Poll for quote
+    deadline = time.time() + QUOTE_TIMEOUT_SECS
+    quote    = None
+    qp       = '/trade-api/v2/communications/quotes'
+    while time.time() < deadline:
+        try:
+            url  = f"{BASE}{qp}?rfq_id={rfq_id}&rfq_creator_user_id={user_id}"
+            qs   = requests.get(url, headers=_pss_headers("GET", qp), timeout=8).json().get('quotes', [])
+            valid_q = []
+            for q in qs:
+                if q.get('status') != 'open': continue
+                yes_bid = float(q.get('yes_bid_dollars', 0) or 0)
+                no_bid  = float(q.get('no_bid_dollars', 0) or 0)
+                if yes_bid >= 0.05:
+                    q['_effective_yes'] = yes_bid
+                    valid_q.append(q)
+                elif no_bid > 0:
+                    implied = round(1.0 - no_bid, 4)
+                    if implied >= 0.05:
+                        q['_effective_yes'] = implied
+                        valid_q.append(q)
+            if valid_q:
+                quote = max(valid_q, key=lambda q: q['_effective_yes'])
+                break
+        except Exception:
+            pass
+        time.sleep(QUOTE_POLL_INTERVAL)
+
+    if not quote:
+        return None
+
+    # Evaluate both sides
+    raw_yes_bid   = float(quote.get('yes_bid_dollars') or 0)
+    raw_no_bid    = float(quote.get('no_bid_dollars') or 0)
+    yes_contracts = float(quote.get('yes_contracts_fp') or 0)
+    no_contracts  = float(quote.get('no_contracts_fp') or 0)
+    yes_conf      = candidate.combined_confidence
+
+    best_side = None
+    best_ev   = -999
+    best_payout = 0
+    best_cost   = 0
+
+    if raw_yes_bid > 0.01 and yes_contracts > 0:
+        cost_a   = raw_yes_bid * yes_contracts
+        ev_a     = yes_conf * (yes_contracts - cost_a) - (1-yes_conf) * cost_a
+        payout_a = yes_contracts / cost_a if cost_a > 0 else 0
+        if ev_a > best_ev and payout_a >= 1.3:
+            best_ev = ev_a; best_side = 'yes'; best_payout = payout_a; best_cost = cost_a
+
+    if raw_no_bid > 0.01 and no_contracts > 0:
+        win_b    = raw_no_bid * no_contracts
+        cost_b   = (1.0 - raw_no_bid) * no_contracts
+        ev_b     = yes_conf * win_b - (1-yes_conf) * cost_b
+        payout_b = win_b / cost_b if cost_b > 0 else 0
+        if ev_b > best_ev and payout_b >= 1.3:
+            best_ev = ev_b; best_side = 'no'; best_payout = payout_b; best_cost = cost_b
+
+    if not best_side:
+        return None
+
+    quote['_best_side']   = best_side
+    quote['_best_payout'] = round(best_payout, 1)
+    quote['_best_cost']   = round(best_cost, 2)
+    return quote
+
+
+def accept_quote(quote_id: str, side: str) -> bool:
+    """Accept a previously fetched quote by ID."""
+    try:
+        BASE         = "https://api.elections.kalshi.com"
+        accept_path  = f'/trade-api/v2/communications/quotes/{quote_id}/accept'
+        r = requests.put(f"{BASE}{accept_path}", headers=_pss_headers("PUT", accept_path),
+                         json={"accepted_side": side}, timeout=8)
+        if r.status_code in (200, 204):
+            log.info(f"[Combo] Quote {quote_id[:8]} accepted as {side}")
+            return True
+        log.warning(f"[Combo] Accept failed: {r.status_code} {r.text[:100]}")
+        return False
+    except Exception as e:
+        log.error(f"[Combo] accept_quote error: {e}")
+        return False
+
+
 def submit_rfq(candidate: ComboCandidate,
                stake_dollars: float = MAX_COMBO_STAKE) -> Optional[dict]:
     """
@@ -314,7 +493,7 @@ def submit_rfq(candidate: ComboCandidate,
     BASE    = "https://api.elections.kalshi.com"
 
     def _event_ticker(t):
-        m = _re.match(r'(KXNBA[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}[A-Z]+)', t)
+        m = _re.match(r'(KXNBA[A-Z0-9]+-[0-9]{2}[A-Z]{3}\d{2}[A-Z]+)', t)
         return m.group(1) if m else t.rsplit('-', 2)[0]
 
     # ── Step 1: Create dynamic market ticker ───────────────────────────
@@ -391,68 +570,92 @@ def submit_rfq(candidate: ComboCandidate,
         return None
 
     # ── Step 4: Evaluate quote ─────────────────────────────────────────
-    quote_id  = quote.get('id')
-    yes_bid   = float(quote.get('_effective_yes', 0) or quote.get('yes_bid_dollars', 0) or 0)
-    contracts = float(quote.get('no_contracts_fp') or quote.get('yes_contracts_fp', 1) or 1)
-    ev        = _evaluate_quote(candidate, yes_bid, stake_dollars)
-    log.info(f"[Combo] Quote: yes_bid={yes_bid:.4f} EV={ev:+.3f}")
+    quote_id      = quote.get('id')
+    raw_yes_bid   = float(quote.get('yes_bid_dollars') or 0)
+    raw_no_bid    = float(quote.get('no_bid_dollars') or 0)
+    yes_contracts = float(quote.get('yes_contracts_fp') or 0)
+    no_contracts  = float(quote.get('no_contracts_fp') or 0)
+    yes_conf      = candidate.combined_confidence
+    no_conf       = 1.0 - yes_conf
 
-    # Minimum payout check — reject if less than 10x
-    min_payout = 5.0
-    actual_payout = stake_dollars / yes_bid if yes_bid > 0 else 0
-    if actual_payout < min_payout:
-        log.info(f"[Combo] Quote rejected — payout {actual_payout:.1f}x below {min_payout}x minimum")
+    log.info(f"[Combo] yes_bid={raw_yes_bid:.4f} no_bid={raw_no_bid:.4f} "
+             f"yes_c={yes_contracts:.0f} no_c={no_contracts:.0f}")
+
+    # ── Determine best side to accept ─────────────────────────────────
+    accept_side    = None
+    accept_price   = 0.0
+    accept_payout  = 0.0
+    accept_cost    = 0.0
+
+    # Option A: Buy YES directly
+    if raw_yes_bid > 0.01 and yes_contracts > 0:
+        cost_a   = raw_yes_bid * yes_contracts
+        win_a    = yes_contracts
+        ev_a     = yes_conf * (win_a - cost_a) - (1-yes_conf) * cost_a
+        payout_a = win_a / cost_a if cost_a > 0 else 0
+        log.info(f"[Combo] YES option: cost=${cost_a:.2f} win=${win_a:.2f} payout={payout_a:.1f}x EV={ev_a:+.2f}")
+        if ev_a > 0 and payout_a >= 1.3:
+            accept_side   = 'yes'
+            accept_price  = raw_yes_bid
+            accept_payout = payout_a
+            accept_cost   = cost_a
+
+    # Option B: Sell NO (equivalent to buying YES, market maker buys NO from us)
+    if raw_no_bid > 0.01 and no_contracts > 0:
+        # We sell NO: receive no_bid * no_contracts upfront
+        # Risk: if NO wins, we owe (1-no_bid) * no_contracts
+        win_b    = raw_no_bid * no_contracts       # what we win if YES hits
+        cost_b   = (1.0 - raw_no_bid) * no_contracts  # what we lose if NO hits
+        ev_b     = yes_conf * win_b - (1-yes_conf) * cost_b
+        payout_b = win_b / cost_b if cost_b > 0 else 0
+        log.info(f"[Combo] NO sell option: win=${win_b:.2f} risk=${cost_b:.2f} payout={payout_b:.1f}x EV={ev_b:+.2f}")
+        # Only prefer NO sell if better EV than YES buy
+        if ev_b > 0 and payout_b >= 1.3:
+            if accept_side is None or ev_b > (yes_conf * (accept_payout*accept_cost - accept_cost) - (1-yes_conf) * accept_cost):
+                accept_side   = 'no'
+                accept_price  = raw_no_bid
+                accept_payout = payout_b
+                accept_cost   = cost_b
+
+    if accept_side is None:
+        log.info(f"[Combo] No acceptable side found — EV negative or payout too low")
         return None
 
-    # EV check — audit shows combos are underconfident by ~33%
-    # Apply calibration correction: boost combined_conf by 33% for EV calc
-    calibrated_conf = min(0.95, candidate.combined_confidence * 1.33)
-    ev_calibrated   = _evaluate_quote_with_conf(candidate, yes_bid, stake_dollars, calibrated_conf)
-    log.info(f"[Combo] EV raw={ev:+.3f} calibrated={ev_calibrated:+.3f} (conf boost 33%)")
-    if ev_calibrated <= 0:
-        log.info(f"[Combo] Quote rejected — negative EV after calibration")
-        return None
+    log.info(f"[Combo] Accepting {accept_side.upper()} @ {accept_price:.4f} "
+             f"payout={accept_payout:.1f}x cost=${accept_cost:.2f}")
 
-    # ── Step 4: Accept (confirm is automatic) ─────────────────────────
+    # ── Step 5: Accept ─────────────────────────────────────────────────
     try:
         accept_path = f'/trade-api/v2/communications/quotes/{quote_id}/accept'
         r_accept = requests.put(
             f"https://api.elections.kalshi.com{accept_path}",
             headers=_pss_headers("PUT", accept_path),
-            json={"accepted_side": "yes"},
+            json={"accepted_side": accept_side},
             timeout=8
         )
         if r_accept.status_code in (200, 204):
-            log.info(f"[Combo] Quote accepted and auto-confirmed: {quote_id}")
-            # Record to positions DB
+            log.info(f"[Combo] ✅ Quote accepted: {accept_side.upper()} "
+                     f"payout={accept_payout:.1f}x → win ${accept_cost*accept_payout:.2f}")
+            quote['_accepted_side']  = accept_side
+            quote['_accepted_price'] = accept_price
+            quote['_payout']         = accept_payout
+            quote['_cost']           = accept_cost
+            # Record to DB
             try:
                 from data.positions_db import record_order, record_fill
-                legs_str = ' + '.join([l.ticker.split('-')[-2] for l in candidate.legs[:3]])
-                record_order(
-                    order_id        = quote_id,
-                    client_order_id = quote_id,
-                    ticker          = quote.get('market_ticker', ''),
-                    strategy        = f'combo_{best_side}',
-                    side            = best_side,
-                    price_cents     = int(best_price * 100),
-                    contracts       = int(best_contracts),
-                    source          = 'bot',
-                )
-                record_fill(
-                    ticker          = quote.get('market_ticker', ''),
-                    order_id        = quote_id,
-                    client_order_id = quote_id,
-                    side            = best_side,
-                    qty             = int(best_contracts),
-                    fill_price      = int(best_price * 100),
-                    source          = 'bot',
-                    strategy        = f'combo_{best_side}',
-                    confidence      = candidate.combined_confidence,
-                    edge            = 0.0,
-                    hit_rate        = 0.0,
-                    reason          = f'{len(candidate.legs)}-leg combo {best_side} @ {best_price:.3f} payout={quote.get("_payout",0):.1f}x',
-                )
-                log.info(f"[Combo] Recorded to positions DB")
+                record_order(order_id=quote_id, client_order_id=quote_id,
+                    ticker=quote.get('market_ticker',''), strategy=f'combo_{accept_side}',
+                    side=accept_side, price_cents=int(accept_price*100),
+                    contracts=int(no_contracts if accept_side=='no' else yes_contracts),
+                    source='bot')
+                record_fill(ticker=quote.get('market_ticker',''), order_id=quote_id,
+                    client_order_id=quote_id, side=accept_side,
+                    qty=int(no_contracts if accept_side=='no' else yes_contracts),
+                    fill_price=int(accept_price*100), source='bot',
+                    strategy=f'combo_{accept_side}', confidence=yes_conf,
+                    edge=0.0, hit_rate=0.0,
+                    reason=f'{len(candidate.legs)}-leg {accept_side.upper()} combo '
+                           f'payout={accept_payout:.1f}x cost=${accept_cost:.2f}')
             except Exception as _dbe:
                 log.debug(f"[Combo] DB record failed: {_dbe}")
             return quote
@@ -460,7 +663,7 @@ def submit_rfq(candidate: ComboCandidate,
             log.warning(f"[Combo] Accept failed: {r_accept.status_code} {r_accept.text[:100]}")
             return None
     except Exception as e:
-        log.error(f"[Combo] Accept failed: {e}")
+        log.error(f"[Combo] Accept error: {e}")
         return None
 
 
@@ -514,13 +717,23 @@ HC_MIN_PAYOUT        = 2.0     # Low payout floor, we want hit rate
 
 def scan_all_props() -> list[ComboLeg]:
     """
-    Scan all open NBA prop markets using edge-based selection.
-    Finds legs where our model disagrees with market price (positive edge).
-    Edge = model_confidence - market_price
+    Scan all NBA prop markets using threshold optimizer as primary source.
+    For each player+stat, finds the threshold with maximum model edge.
+    Falls back to prop_scanner if optimizer returns nothing.
     """
+    try:
+        from data.threshold_optimizer import find_optimal_legs, to_combo_legs
+        optimal = find_optimal_legs()
+        if optimal:
+            legs = to_combo_legs(optimal)
+            log.info(f"[Combo] {len(legs)} edge-qualified legs (threshold optimizer)")
+            return legs
+    except Exception as e:
+        log.warning(f"[Combo] Threshold optimizer failed: {e}, falling back")
+
+    # Fallback to prop_scanner
     from data.prop_scanner import scan_edges
     edge_legs = scan_edges()
-
     combo_legs = []
     for leg in edge_legs:
         combo_legs.append(ComboLeg(
@@ -531,8 +744,7 @@ def scan_all_props() -> list[ComboLeg]:
             is_yes_only       = True,
             reasoning         = leg['reasoning'],
         ))
-
-    log.info(f"[Combo] {len(combo_legs)} edge-qualified legs")
+    log.info(f"[Combo] {len(combo_legs)} edge-qualified legs (fallback scanner)")
     return combo_legs
 
 

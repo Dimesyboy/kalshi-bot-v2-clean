@@ -209,19 +209,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await query.edit_message_text(f"✅ Found {len(candidate.legs)}-leg combo — analysing...")
             legs_with_reasons = [(leg, explain_leg(leg)) for leg in candidate.legs]
-            # Calculate actual payout
-            market_cost = 1.0
-            for l in candidate.legs: market_cost *= l.implied_prob
-            actual_payout = round(1/market_cost, 0) if market_cost > 0 else 0
             msg = format_parlay(candidate, legs_with_reasons)
-            msg += f"\n\n💰 *Payout: ~{actual_payout:.0f}x on $5 = ${5*actual_payout:.0f}*"
-            msg += f"\n🎯 Win prob: {round(candidate.combined_confidence*100,1)}%"
+            msg += f"\n\n⏳ *Tap Quote to get real payout from market maker*"
             await query.edit_message_text(
                 msg,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Buy $5 YES", callback_data="buy_moonshot"),
-                     InlineKeyboardButton("🔄 Rescan",    callback_data="parlay")],
+                    [InlineKeyboardButton("💬 Get Quote", callback_data="quote_moonshot"),
+                     InlineKeyboardButton("🔄 Rescan",   callback_data="parlay")],
                     [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
                 ])
             )
@@ -229,29 +224,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Error: {str(e)[:100]}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
 
-    elif data == "buy_moonshot":
-        await query.edit_message_text("⏳ Submitting moonshot RFQ...")
+    elif data == "quote_moonshot":
+        await query.edit_message_text("⏳ Fetching quote from market maker... (~5s)")
         try:
-            from combo_scanner import scan_all_props, build_best_combo, submit_rfq
+            from combo_scanner import scan_all_props, build_best_combo, get_rfq_quote
             legs      = scan_all_props()
             candidate = build_best_combo(legs)
             if not candidate:
                 await query.edit_message_text("❌ No combo available",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
                 return
-            quote = submit_rfq(candidate, stake_dollars=5.0)
+            quote = get_rfq_quote(candidate, stake_dollars=5.0)
             if quote:
-                side   = quote.get('_accepted_side','?')
-                payout = quote.get('_payout', 0)
+                side   = quote.get('_best_side','?')
+                payout = quote.get('_best_payout', 0)
+                cost   = quote.get('_best_cost', 5.0)
+                win    = round(cost * payout, 2)
+                context.user_data['pending_quote_id']   = quote.get('id')
+                context.user_data['pending_quote_side'] = side
+                context.user_data['pending_payout']     = payout
+                context.user_data['pending_cost']       = cost
                 await query.edit_message_text(
-                    f"✅ *Moonshot Placed!*\n{side.upper()} | {payout:.1f}x → win ${5*payout:.0f}",
+                    f"💬 *Moonshot Quote*\n\n"
+                    f"Side: {side.upper()}\n"
+                    f"Cost: ${cost:.2f} → Win: ${win:.2f} ({payout:.1f}x)\n\n"
+                    f"Accept?",
                     parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"✅ Accept ${cost:.2f}", callback_data="accept_pending"),
+                         InlineKeyboardButton("⏭ Skip",               callback_data="parlay")],
+                        [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+                    ])
                 )
             else:
                 await query.edit_message_text("❌ No quote — try closer to game time",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Retry", callback_data="buy_moonshot"),
+                        [InlineKeyboardButton("🔄 Retry", callback_data="quote_moonshot"),
                          InlineKeyboardButton("🔙 Menu",  callback_data="menu")]
                     ]))
         except Exception as e:
@@ -274,15 +282,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"✅ Found {len(candidate.legs)}-leg monster — analysing...")
             legs_with_reasons = [(leg, explain_leg(leg)) for leg in candidate.legs]
             msg = format_parlay(candidate, legs_with_reasons)
+            msg += f"\n\n⏳ *Tap Quote to get real payout from market maker*"
             await query.edit_message_text(
                 msg, parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 Rescan", callback_data="highconf"),
-                    InlineKeyboardButton("🔙 Menu",   callback_data="menu")
-                ]])
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💬 Get Quote", callback_data="quote_monster"),
+                     InlineKeyboardButton("🔄 Rescan",   callback_data="highconf")],
+                    [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+                ])
             )
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {str(e)[:100]}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+
+    elif data == "quote_monster":
+        await query.edit_message_text("⏳ Fetching quote from market maker... (~5s)")
+        try:
+            from combo_scanner import scan_all_props, build_highconf_combo, get_rfq_quote
+            legs      = scan_all_props()
+            candidate = build_highconf_combo(legs)
+            if not candidate:
+                await query.edit_message_text("❌ No combo available",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+                return
+            quote = get_rfq_quote(candidate, stake_dollars=5.0)
+            if quote:
+                side   = quote.get('_best_side','?')
+                payout = quote.get('_best_payout', 0)
+                cost   = quote.get('_best_cost', 5.0)
+                win    = round(cost * payout, 2)
+                context.user_data['pending_quote_id']   = quote.get('id')
+                context.user_data['pending_quote_side'] = side
+                context.user_data['pending_payout']     = payout
+                context.user_data['pending_cost']       = cost
+                await query.edit_message_text(
+                    f"💬 *Monster Quote*\n\n"
+                    f"Side: {side.upper()}\n"
+                    f"Cost: ${cost:.2f} → Win: ${win:.2f} ({payout:.1f}x)\n\n"
+                    f"Accept?",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"✅ Accept ${cost:.2f}", callback_data="accept_pending"),
+                         InlineKeyboardButton("⏭ Skip",               callback_data="highconf")],
+                        [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+                    ])
+                )
+            else:
+                await query.edit_message_text("❌ No quote — try closer to game time",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Retry", callback_data="quote_monster"),
+                         InlineKeyboardButton("🔙 Menu",  callback_data="menu")]
+                    ]))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {str(e)[:200]}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
 
     elif data == "no_parlay":
@@ -384,6 +436,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("🔙 Menu",  callback_data="menu")
                     ]])
                 )
+        except Exception as e:
+            await query.edit_message_text(f"❌ {str(e)[:200]}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+
+    elif data == "accept_pending":
+        await query.edit_message_text("⏳ Accepting...")
+        try:
+            from combo_scanner import accept_quote
+            from data.positions_db import record_order, record_fill
+            quote_id = context.user_data.get('pending_quote_id') or context.user_data.get('fade_quote_id')
+            side     = context.user_data.get('pending_quote_side') or context.user_data.get('fade_accept_side','no')
+            payout   = context.user_data.get('pending_payout') or context.user_data.get('fade_payout', 0)
+            cost     = context.user_data.get('pending_cost') or context.user_data.get('fade_cost', 0)
+            if not quote_id:
+                await query.edit_message_text("❌ Quote expired — rescan",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+                return
+            result = accept_quote(quote_id, side)
+            if result:
+                win = round(cost * payout, 2)
+                await query.edit_message_text(
+                    f"✅ *Placed!*\nSide: {side.upper()} | Cost: ${cost:.2f}\nWin: ${win:.2f} ({payout:.1f}x)",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
+                )
+                # Clear stored quote
+                for k in ['pending_quote_id','pending_quote_side','pending_payout','pending_cost',
+                          'fade_quote_id','fade_accept_side','fade_payout','fade_cost']:
+                    context.user_data.pop(k, None)
+            else:
+                await query.edit_message_text("❌ Accept failed — quote expired",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Rescan", callback_data="menu")]
+                    ]))
         except Exception as e:
             await query.edit_message_text(f"❌ {str(e)[:200]}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
