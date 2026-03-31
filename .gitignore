@@ -1,0 +1,16 @@
+*.db
+*.db-shm  
+*.db-wal
+data/*.db
+data/*.json
+*.log
+.env
+.git-credentials
+.bash_history
+keys/
+__pycache__/
+*.pyc
+pending_orders.json
+open_positions.json
+cooldowns.json
+bot_orders.json

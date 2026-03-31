@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Kalshi Bot">
+  <title>Kalshi Bot</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      padding-bottom: 80px;
+    }
+    .header {
+      background: linear-gradient(135deg, #1a1a2e, #16213e);
+      padding: 50px 20px 20px;
+      border-bottom: 1px solid #333;
+    }
+    .header h1 { font-size: 28px; font-weight: 700; }
+    .header p  { color: #888; font-size: 13px; margin-top: 4px; }
+    .balance-card {
+      background: linear-gradient(135deg, #00b894, #00cec9);
+      margin: 16px;
+      border-radius: 16px;
+      padding: 20px;
+    }
+    .balance-card .label { font-size: 12px; opacity: 0.8; text-transform: uppercase; letter-spacing: 1px; }
+    .balance-card .amount { font-size: 42px; font-weight: 700; margin-top: 4px; }
+    .balance-card .sub { font-size: 12px; opacity: 0.8; margin-top: 4px; }
+    .section { margin: 16px; }
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: #666;
+      margin-bottom: 10px;
+    }
+    .btn-row { display: flex; gap: 10px; }
+    .btn {
+      flex: 1;
+      padding: 16px;
+      border-radius: 14px;
+      border: none;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      transition: opacity 0.2s;
+    }
+    .btn:active { opacity: 0.7; }
+    .btn .icon { font-size: 28px; }
+    .btn-moonshot { background: linear-gradient(135deg, #6c5ce7, #a29bfe); color: #fff; }
+    .btn-monster  { background: linear-gradient(135deg, #e17055, #d63031); color: #fff; }
+    .card {
+      background: #1a1a1a;
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 10px;
+      border: 1px solid #2a2a2a;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .card-title { font-size: 16px; font-weight: 600; }
+    .badge {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+    .badge-green  { background: #00b894; color: #fff; }
+    .badge-purple { background: #6c5ce7; color: #fff; }
+    .badge-red    { background: #d63031; color: #fff; }
+    .leg {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #2a2a2a;
+      font-size: 13px;
+    }
+    .leg:last-child { border-bottom: none; }
+    .leg-name { color: #ddd; flex: 1; }
+    .leg-conf { color: #00b894; font-weight: 600; font-size: 12px; margin-left: 8px; }
+    .leg-edge { color: #6c5ce7; font-size: 11px; margin-left: 6px; }
+    .payout-row {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #2a2a2a;
+    }
+    .payout-label { color: #888; font-size: 13px; }
+    .payout-value { font-size: 20px; font-weight: 700; color: #00b894; }
+    .game-card {
+      background: #1a1a1a;
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 8px;
+      border: 1px solid #2a2a2a;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .game-teams { font-size: 14px; font-weight: 600; }
+    .game-score { font-size: 18px; font-weight: 700; color: #00b894; }
+    .game-status { font-size: 11px; color: #888; margin-top: 2px; }
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid #333;
+      border-top-color: #00b894;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 12px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .nav {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: #111;
+      border-top: 1px solid #2a2a2a;
+      display: flex;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .nav-item {
+      flex: 1;
+      padding: 12px 0;
+      text-align: center;
+      cursor: pointer;
+      font-size: 10px;
+      color: #666;
+      transition: color 0.2s;
+    }
+    .nav-item.active { color: #00b894; }
+    .nav-item .nav-icon { font-size: 22px; display: block; margin-bottom: 2px; }
+    .screen { display: none; }
+    .screen.active { display: block; }
+    .error { color: #e17055; font-size: 13px; text-align: center; padding: 20px; }
+    .refresh-btn {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #888;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- HOME -->
+<div id="screen-home" class="screen active">
+  <div class="header">
+    <h1>🤖 Kalshi Bot</h1>
+    <p id="last-updated">Loading...</p>
+  </div>
+
+  <div class="balance-card">
+    <div class="label">Portfolio Balance</div>
+    <div class="amount" id="balance-amount">--</div>
+    <div class="sub" id="combo-sub">Loading...</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Find Best Combo</div>
+    <div class="btn-row">
+      <button class="btn btn-moonshot" onclick="showParlay('moonshot')">
+        <span class="icon">🎯</span>
+        <span>Moonshot</span>
+      </button>
+      <button class="btn btn-monster" onclick="showParlay('monster')">
+        <span class="icon">💪</span>
+        <span>Monster</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Tonight's Games</div>
+    <div id="games-list"><div class="loading"><div class="spinner"></div>Loading...</div></div>
+  </div>
+</div>
+
+<!-- PARLAY -->
+<div id="screen-parlay" class="screen">
+  <div class="header">
+    <h1 id="parlay-title">🎯 Moonshot</h1>
+    <p id="parlay-sub">Scanning props...</p>
+  </div>
+  <div class="section" id="parlay-content">
+    <div class="loading"><div class="spinner"></div>Scanning props...</div>
+  </div>
+</div>
+
+<!-- COMBOS -->
+<div id="screen-combos" class="screen">
+  <div class="header">
+    <h1>📋 My Combos</h1>
+    <p>Recent combo trades</p>
+  </div>
+  <div class="section" id="combos-content">
+    <div class="loading"><div class="spinner"></div>Loading...</div>
+  </div>
+</div>
+
+<!-- STATS -->
+<div id="screen-stats" class="screen">
+  <div class="header">
+    <h1>📊 Stats</h1>
+    <p>Trading performance</p>
+  </div>
+  <div class="section" id="stats-content">
+    <div class="loading"><div class="spinner"></div>Loading...</div>
+  </div>
+</div>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-item active" onclick="showScreen('home')">
+    <span class="nav-icon">🏠</span>Home
+  </div>
+  <div class="nav-item" onclick="showScreen('parlay-select')">
+    <span class="nav-icon">🎯</span>Parlay
+  </div>
+  <div class="nav-item" onclick="showScreen('combos')">
+    <span class="nav-icon">📋</span>Combos
+  </div>
+  <div class="nav-item" onclick="showScreen('stats')">
+    <span class="nav-icon">📊</span>Stats
+  </div>
+</nav>
+
+<script>
+const API_BASE = 'http://137.184.84.50:8080';
+const API_KEY  = '32bf0ca0832d48646314f72b2a429da2';
+
+async function api(path) {
+  const r = await fetch(API_BASE + path, {
+    headers: { 'x-api-key': API_KEY }
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
+  if (name === 'parlay-select') {
+    document.getElementById('screen-home').classList.add('active');
+    document.querySelectorAll('.nav-item')[1].classList.add('active');
+    document.querySelector('.section').scrollIntoView({behavior:'smooth'});
+    return;
+  }
+
+  const screens = ['home','parlay','combos','stats'];
+  const idx = screens.indexOf(name);
+  document.getElementById('screen-' + name).classList.add('active');
+  if (idx >= 0) document.querySelectorAll('.nav-item')[idx].classList.add('active');
+
+  if (name === 'combos') loadCombos();
+  if (name === 'stats')  loadStats();
+  if (name === 'home')   loadHome();
+}
+
+async function loadHome() {
+  try {
+    const [bal, sched] = await Promise.all([api('/api/balance'), api('/api/schedule')]);
+    document.getElementById('balance-amount').textContent = '$' + bal.balance.toFixed(2);
+    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+    // Games
+    const gamesList = document.getElementById('games-list');
+    const games = sched.games.filter(g => !g.completed || g.status === 'STATUS_IN_PROGRESS');
+    if (!games.length) {
+      gamesList.innerHTML = '<div class="error">No games in progress</div>';
+    } else {
+      gamesList.innerHTML = games.map(g => {
+        const t = g.teams;
+        const score = t.length === 2 ? `${t[0].score} - ${t[1].score}` : '';
+        const status = g.status === 'STATUS_IN_PROGRESS' ? '🔴 LIVE' :
+                       g.status === 'STATUS_SCHEDULED' ? '⏰ Soon' : '✅ Final';
+        return `<div class="game-card">
+          <div>
+            <div class="game-teams">${g.name.replace(' at ', ' @ ')}</div>
+            <div class="game-status">${status}</div>
+          </div>
+          <div class="game-score">${score}</div>
+        </div>`;
+      }).join('');
+    }
+
+    // Combo sub
+    const combos = await api('/api/combos');
+    document.getElementById('combo-sub').textContent =
+      `${combos.combos.length} combos placed`;
+  } catch(e) {
+    document.getElementById('balance-amount').textContent = 'Error';
+  }
+}
+
+async function showParlay(mode) {
+  showScreen('parlay');
+  const title = mode === 'monster' ? '💪 Monster Combo' : '🎯 Moonshot Combo';
+  document.getElementById('parlay-title').textContent = title;
+  document.getElementById('parlay-sub').textContent = 'Scanning props...';
+  document.getElementById('parlay-content').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Scanning (~10s)...</div>';
+
+  try {
+    const data = await api('/api/parlay/' + mode);
+    document.getElementById('parlay-sub').textContent =
+      `${data.leg_count} legs · ${data.confidence}% conf`;
+
+    if (!data.found) {
+      document.getElementById('parlay-content').innerHTML =
+        '<div class="error">No qualifying combo right now. Try closer to game time.</div>';
+      return;
+    }
+
+    const legsHtml = data.legs.map(l => {
+      const player = l.player || l.ticker;
+      const thr = l.ticker.split('-').pop();
+      const series = l.ticker.split('-')[0];
+      const statMap = {KXNBAPTS:'pts',KXNBAREB:'reb',KXNBAAST:'ast',
+                       KXNBA3PT:'3s',KXNBASTL:'stl',KXNBABLK:'blk'};
+      const stat = statMap[series] || '';
+      return `<div class="leg">
+        <span class="leg-name">${player} ${thr}+ ${stat}</span>
+        <span class="leg-conf">${l.confidence}%</span>
+        <span class="leg-edge">+${l.edge}¢</span>
+      </div>`;
+    }).join('');
+
+    document.getElementById('parlay-content').innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">${data.leg_count} Legs</span>
+          <span class="badge badge-green">${data.payout}x</span>
+        </div>
+        ${legsHtml}
+        <div class="payout-row">
+          <span class="payout-label">$5 stake → potential</span>
+          <span class="payout-value">$${data.win_amount}</span>
+        </div>
+      </div>
+      <button class="refresh-btn" onclick="showParlay('${mode}')">🔄 Rescan</button>`;
+  } catch(e) {
+    document.getElementById('parlay-content').innerHTML =
+      '<div class="error">Error: ' + e.message + '</div>';
+  }
+}
+
+async function loadCombos() {
+  try {
+    const data = await api('/api/combos');
+    const combos = data.combos.reverse();
+    if (!combos.length) {
+      document.getElementById('combos-content').innerHTML =
+        '<div class="error">No combos placed yet</div>';
+      return;
+    }
+    document.getElementById('combos-content').innerHTML = combos.map(c => {
+      const date = new Date(c.time).toLocaleDateString();
+      const payout = c.expected_payout ? c.expected_payout.toFixed(1) : '?';
+      const mode = c.mode || 'combo';
+      return `<div class="card">
+        <div class="card-header">
+          <span class="card-title">${c.legs.length}-leg ${mode}</span>
+          <span class="badge badge-purple">${payout}x</span>
+        </div>
+        <div style="color:#888;font-size:12px">${date} · ${c.legs.length} legs</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('combos-content').innerHTML =
+      '<div class="error">Error loading combos</div>';
+  }
+}
+
+async function loadStats() {
+  try {
+    const data = await api('/api/stats');
+    let html = '';
+
+    // Total revenue banner
+    const rev = data.total_revenue || 0;
+    html += `<div class="balance-card" style="margin:0 0 12px">
+      <div class="label">Total Revenue</div>
+      <div class="amount">$${rev.toFixed(2)}</div>
+      <div class="sub">${data.total_trades || 0} settled trades</div>
+    </div>`;
+
+    // Combos
+    const c = data.combos;
+    if (c && c.n) {
+      const pnl = c.revenue;
+      html += `<div class="card">
+        <div class="card-header">
+          <span class="card-title">🎯 Combos</span>
+          <span class="badge ${pnl >= 0 ? 'badge-green' : 'badge-red'}">$${pnl.toFixed(2)}</span>
+        </div>
+        <div class="leg"><span class="leg-name">Record</span><span class="leg-conf">${c.wins}W / ${c.losses}L</span></div>
+        <div class="leg"><span class="leg-name">Win Rate</span><span class="leg-conf">${c.win_rate}%</span></div>
+      </div>`;
+    }
+
+    // Props
+    const p = data.props;
+    if (p && p.n) {
+      html += `<div class="card">
+        <div class="card-header">
+          <span class="card-title">🏀 Props</span>
+          <span class="badge ${p.revenue >= 0 ? 'badge-green' : 'badge-red'}">$${p.revenue.toFixed(2)}</span>
+        </div>
+        <div class="leg"><span class="leg-name">Record</span><span class="leg-conf">${p.wins}W / ${p.losses}L</span></div>
+        <div class="leg"><span class="leg-name">Win Rate</span><span class="leg-conf">${p.win_rate}%</span></div>
+      </div>`;
+    }
+
+    // Game lines
+    const g = data.games;
+    if (g && g.n) {
+      html += `<div class="card">
+        <div class="card-header">
+          <span class="card-title">🏆 Game Lines</span>
+          <span class="badge ${g.revenue >= 0 ? 'badge-green' : 'badge-red'}">$${g.revenue.toFixed(2)}</span>
+        </div>
+        <div class="leg"><span class="leg-name">Record</span><span class="leg-conf">${g.wins}W / ${g.losses}L</span></div>
+        <div class="leg"><span class="leg-name">Win Rate</span><span class="leg-conf">${g.win_rate}%</span></div>
+      </div>`;
+    }
+
+    // Top winners
+    if (data.top_winners && data.top_winners.length) {
+      html += `<div class="card"><div class="card-header"><span class="card-title">🥇 Top Wins</span></div>`;
+      data.top_winners.forEach(w => {
+        html += `<div class="leg"><span class="leg-name">${w.ticker.slice(-20)}</span><span class="leg-conf">+$${w.revenue.toFixed(2)}</span></div>`;
+      });
+      html += `</div>`;
+    }
+
+    document.getElementById('stats-content').innerHTML = html || '<div class="error">No stats yet</div>';
+  } catch(e) {
+    document.getElementById('stats-content').innerHTML =
+      '<div class="error">Error: ' + e.message + '</div>';
+  }
+}
+
+// Boot
+loadHome();
+</script>
+</body>
+</html>
