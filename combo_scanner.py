@@ -397,10 +397,12 @@ def get_rfq_quote(candidate: ComboCandidate, stake_dollars: float = 5.0) -> dict
             best_ev = ev_a; best_side = 'yes'; best_payout = payout_a; best_cost = cost_a
 
     if raw_no_bid > 0.01 and no_contracts > 0:
-        win_b    = raw_no_bid * no_contracts
-        cost_b   = (1.0 - raw_no_bid) * no_contracts
-        ev_b     = yes_conf * win_b - (1-yes_conf) * cost_b
-        payout_b = win_b / cost_b if cost_b > 0 else 0
+        # Buying NO: pay no_bid per contract, win (1-no_bid) per contract if NO wins
+        no_conf  = 1.0 - yes_conf          # P(at least one leg fails)
+        cost_b   = raw_no_bid * no_contracts           # what we pay
+        win_b    = (1.0 - raw_no_bid) * no_contracts   # what we win
+        ev_b     = no_conf * win_b - yes_conf * cost_b # correct EV
+        payout_b = (1.0 / raw_no_bid) if raw_no_bid > 0 else 0  # true payout
         if ev_b > best_ev and payout_b >= 1.3:
             best_ev = ev_b; best_side = 'no'; best_payout = payout_b; best_cost = cost_b
 

@@ -135,7 +135,7 @@ def score_leg_full(market):
     }
 
 
-def get_best_no_legs(game_filter=None, n=10, yes_min=0.35, yes_max=0.65):
+def get_best_no_legs(game_filter=None, n=10, yes_min=0.70, yes_max=0.88):
     """
     Find best legs for NO combo using full signal stack.
     Prefers: high model conf + smart money YES + liquid + mid-range YES price
@@ -181,33 +181,15 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.35, yes_max=0.65):
 
 def get_collection_ticker(tickers, game_filter=None):
     """
-    Try single-game collection first, fall back to multi-game extended.
-    Single game collections have dedicated MMs per game — better quotes.
+    Always use EXTENDED collection.
+    SINGLEGAME does not support NO positions via RFQ — accept_yes gives YES fill.
+    EXTENDED: accept_yes → fill side=no (HOLD NO) ✅
     """
-    from datetime import date
-    date_str = date.today().strftime('%y%b%d').upper()
-
-    # Try single game collection if all legs from same game
-    if game_filter:
-        sg_ticker = f'KXMVENBASINGLEGAME-{date_str}{game_filter}'
-        try:
-            cp = f'/trade-api/v2/multivariate_event_collections/{sg_ticker}'
-            selected = [{'market_ticker': t, 'event_ticker': evt(t), 'side': 'yes'} for t in tickers]
-            r = requests.post(f'{BASE}{cp}', headers=pss('POST', cp),
-                json={'selected_markets': selected, 'with_market_payload': True}, timeout=8)
-            mt = r.json().get('market_ticker','')
-            if mt:
-                log.info(f'Using single-game collection: {sg_ticker}')
-                return mt, sg_ticker
-        except Exception as e:
-            log.debug(f'Single game collection failed: {e}')
-
-    # Fall back to multi-game extended
     cp = '/trade-api/v2/multivariate_event_collections/KXMVESPORTSMULTIGAMEEXTENDED-R'
     selected = [{'market_ticker': t, 'event_ticker': evt(t), 'side': 'yes'} for t in tickers]
     mt = requests.post(f'{BASE}{cp}', headers=pss('POST', cp),
         json={'selected_markets': selected, 'with_market_payload': True}, timeout=8).json().get('market_ticker','')
-    log.info(f'Using multi-game collection')
+    log.info(f'Using EXTENDED collection')
     return mt, 'KXMVESPORTSMULTIGAMEEXTENDED-R'
 
 
@@ -243,9 +225,13 @@ def submit_no_rfq(tickers, target='10.00', game_filter=None):
     return None, mt
 
 
-def accept_yes_for_no(quote_id):
-    """Accept YES side of quote — gives us NO contracts."""
+def accept_no(quote_id, collection_ticker=''):
+    """
+    Accept YES on EXTENDED collection → gives NO position (fill side=no).
+    EXTENDED is the only collection that supports true NO positions via RFQ.
+    """
     ap = f'/trade-api/v2/communications/quotes/{quote_id}/accept'
+    log.info(f'Accepting YES on EXTENDED to get NO position')
     r  = requests.put(f'{BASE}{ap}', headers=pss('PUT', ap),
                       json={'accepted_side': 'yes'}, timeout=8)
     return r.status_code in (200, 204), r.text
@@ -265,13 +251,14 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
 
     # Get best legs
     tickers = get_best_no_legs(game_filter, n=n_legs)
-    if len(tickers) < 4:
+    if len(tickers) < n_legs:
         log.warning(f'Not enough legs ({len(tickers)}) — aborting')
         return False
 
     # Submit RFQ
     log.info(f'Submitting {len(tickers)}-leg RFQ at target ${target}...')
     quote, mt = submit_no_rfq(tickers, target, game_filter=game_filter)
+    mt = mt or ''  # collection ticker for accept routing
     if not quote:
         log.warning('No quote received')
         return False
@@ -283,46 +270,44 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
 
     log.info(f'Quote: yes_bid={yb:.4f} yes_c={yc:.0f} | no_bid={nb:.4f} no_c={nc:.0f}')
 
-    if yc > 0:
-        yes_cost = round(yb*yc, 4)
-        payout   = round(yc/yes_cost, 0) if yes_cost > 0 else 0
-        log.info(f'YES side available: cost=${yes_cost:.4f} win=${yc:.2f} ({payout:.0f}x)')
+    # Buy NO side: pay no_bid per contract, win (1-no_bid) per contract if any leg fails
+    # Payout = 1/no_bid (e.g. no_bid=0.48 → 2.08x)
+    if nc > 0 and nb > 0.01:
+        no_cost = round(nb * nc, 4)
+        no_win  = round((1.0 - nb) * nc, 4)
+        payout  = round(1.0 / nb, 2)
+        log.info(f'NO quote: no_bid={nb:.4f} contracts={nc:.0f}')
+        log.info(f'  Cost   = {nb:.4f} x {nc:.0f} = ${no_cost:.4f}')
+        log.info(f'  Win    = {1-nb:.4f} x {nc:.0f} = ${no_win:.4f}')
+        log.info(f'  Payout = 1/{nb:.4f} = {payout:.2f}x')
 
-        # ── Payout guard — reject weak quotes ────────────────────────
-        MIN_PAYOUT = 200    # minimum 200x payout ratio
-        MAX_COST   = 5.00   # never spend more than $5 total
+        MIN_PAYOUT = 1.5   # no_bid < 0.67
+        MAX_COST   = 5.00  # max spend
 
         if payout < MIN_PAYOUT:
-            log.info(f'REJECTED: payout {payout:.0f}x < {MIN_PAYOUT}x minimum — bad deal')
+            log.info(f'REJECTED: {payout:.2f}x < {MIN_PAYOUT}x minimum')
             return False
-        if yes_cost > MAX_COST:
-            log.info(f'REJECTED: cost ${yes_cost:.4f} > ${MAX_COST:.2f} max spend')
+        if no_cost > MAX_COST:
+            log.info(f'REJECTED: cost ${no_cost:.4f} > ${MAX_COST:.2f} max')
             return False
-        # ─────────────────────────────────────────────────────────────
-        log.info(f'Win condition: ANY of {len(tickers)} legs fails')
 
-        ok, msg = accept_yes_for_no(quote.get('id',''))
+        ok, msg = accept_no(quote.get('id',''), collection_ticker=mt)
         if ok:
-            log.info(f'✅ PLACED — holding NO, win=${yc:.2f} ({payout:.0f}x)')
+            log.info(f'PLACED — NO hold cost=${no_cost:.4f} win=${no_win:.4f} ({payout:.2f}x)')
             return True
         else:
             log.warning(f'Accept failed: {msg[:80]}')
-            # Try increasing target for more contracts
             return False
     else:
-        no_cost = round((1-nb)*nc, 2) if nc > 0 else 0
-        no_win  = round(nb*nc, 2) if nc > 0 else 0
-        no_pay  = round(no_win/no_cost, 1) if no_cost > 0 else 0
-        log.info(f'NO only quote: cost=${no_cost:.2f} win=${no_win:.2f} ({no_pay:.1f}x)')
-        log.info(f'yes_c=0 — MM not quoting YES yet, try closer to tip')
+        log.info(f'No valid NO quote: nb={nb:.4f} nc={nc:.0f}')
         return False
 
 
 if __name__ == '__main__':
     import sys
     game   = sys.argv[1] if len(sys.argv) > 1 else None
-    target = sys.argv[2] if len(sys.argv) > 2 else '50.00'
-    n      = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+    target = sys.argv[2] if len(sys.argv) > 2 else '5.00'
+    n      = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     label  = game or 'ALL'
 
     # Retry up to 10 times with 3 min gaps — yes_c populates closer to tip
