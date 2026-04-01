@@ -53,7 +53,7 @@ SMART_ALERT_MIN  = 2000      # smart money threshold for signal alert
 OI_MIN           = 5000     # min OI to track a prop
 NO_BUY_YES_MIN   = 0.40     # min YES price for NO buy
 NO_BUY_YES_MAX   = 0.72     # max YES price for NO buy
-AUTO_FIRE        = True     # set True to auto-fire nobot on signals
+AUTO_FIRE        = False     # set True to auto-fire nobot on signals
 
 BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
@@ -185,7 +185,7 @@ def get_all_markets(game_filter=None):
               'KXNBAPTS','KXNBAREB','KXNBAAST','KXNBA3PT','KXNBASTL']:
         try:
             data = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
-            mkts = [m for m in data.get('markets',[]) if 'MAR31' in m.get('ticker','')]
+            from datetime import date as _d; _ts = _d.today().strftime('%y%b%d').upper(); mkts = [m for m in data.get('markets',[]) if _ts in m.get('ticker','')]
             if game_filter:
                 mkts = [m for m in mkts if game_filter in m.get('ticker','')]
             all_m.extend(mkts)
@@ -299,16 +299,39 @@ def check_signals(m, yes_vol, no_vol, smart, buyp, yes_book, no_book, quoters):
     return signals
 
 # ── Auto-fire ──────────────────────────────────────────────────────────────
+# Track which games nobot has already been fired for today
+_fired_games = set()
+
 def try_auto_fire(game, signals_found):
-    """Fire nobot if MM is online and NO_BUY_OPP signal found."""
+    """Fire nobot when MM is online and smart money signals are strong."""
     if not AUTO_FIRE: return
-    if 'MM_ONLINE' not in signals_found and 'NO_BUY_OPP' not in signals_found: return
-    game_code = game.replace('KXNBAPTS-26MAR31','').replace('KXNBA','')[:6]
-    log.info(f'[AUTO_FIRE] Firing nobot for {game_code}...')
+
+    # Need strong signals — not just any signal
+    strong = ('MM_ONLINE' in signals_found or
+              'SMART_MONEY' in signals_found or
+              'NO_BUY_OPP' in signals_found)
+    if not strong: return
+
+    # Extract game code from ticker e.g. KXNBAPTS-26APR01MILHOU → MILHOU
+    import re as _re
+    from datetime import date as _date
+    today = _date.today().strftime('%y%b%d').upper()
+    m = _re.search(rf'{today}([A-Z]{{6}})', game)
+    if not m: return
+    game_code = m.group(1)
+
+    # Only fire once per game per session
+    if game_code in _fired_games:
+        return
+    _fired_games.add(game_code)
+
+    log.info(f'[AUTO_FIRE] 🚀 Firing nobot for {game_code} signals={signals_found}')
     import subprocess
-    subprocess.Popen([sys.executable, '/root/kalshi-bot-v2/nobot.py',
-                     game_code, '1.00', '10'])
-    log_run('AUTO_FIRE', f'game={game_code}')
+    subprocess.Popen([
+        sys.executable, '/root/kalshi-bot-v2/nobot.py',
+        game_code, '50.00', '8'
+    ])
+    log_run('AUTO_FIRE', f'game={game_code} signals={signals_found}')
 
 # ── Main loop ──────────────────────────────────────────────────────────────
 def run(game_filter=None):

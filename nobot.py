@@ -135,7 +135,7 @@ def score_leg_full(market):
     }
 
 
-def get_best_no_legs(game_filter=None, n=10, yes_min=0.35, yes_max=0.78):
+def get_best_no_legs(game_filter=None, n=10, yes_min=0.35, yes_max=0.65):
     """
     Find best legs for NO combo using full signal stack.
     Prefers: high model conf + smart money YES + liquid + mid-range YES price
@@ -287,6 +287,18 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
         yes_cost = round(yb*yc, 4)
         payout   = round(yc/yes_cost, 0) if yes_cost > 0 else 0
         log.info(f'YES side available: cost=${yes_cost:.4f} win=${yc:.2f} ({payout:.0f}x)')
+
+        # ── Payout guard — reject weak quotes ────────────────────────
+        MIN_PAYOUT = 200    # minimum 200x payout ratio
+        MAX_COST   = 5.00   # never spend more than $5 total
+
+        if payout < MIN_PAYOUT:
+            log.info(f'REJECTED: payout {payout:.0f}x < {MIN_PAYOUT}x minimum — bad deal')
+            return False
+        if yes_cost > MAX_COST:
+            log.info(f'REJECTED: cost ${yes_cost:.4f} > ${MAX_COST:.2f} max spend')
+            return False
+        # ─────────────────────────────────────────────────────────────
         log.info(f'Win condition: ANY of {len(tickers)} legs fails')
 
         ok, msg = accept_yes_for_no(quote.get('id',''))
@@ -309,8 +321,23 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
 if __name__ == '__main__':
     import sys
     game   = sys.argv[1] if len(sys.argv) > 1 else None
-    target = sys.argv[2] if len(sys.argv) > 2 else '10.00'
-    n      = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+    target = sys.argv[2] if len(sys.argv) > 2 else '50.00'
+    n      = int(sys.argv[3]) if len(sys.argv) > 3 else 8
     label  = game or 'ALL'
 
-    fire_no_combo(game_filter=game, target=target, label=label, n_legs=n)
+    # Retry up to 10 times with 3 min gaps — yes_c populates closer to tip
+    MAX_RETRIES = 10
+    RETRY_SECS  = 180  # 3 minutes
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        log.info(f'Attempt {attempt}/{MAX_RETRIES}...')
+        result = fire_no_combo(game_filter=game, target=target,
+                               label=label, n_legs=n)
+        if result:
+            log.info(f'✅ SUCCESS on attempt {attempt}')
+            break
+        if attempt < MAX_RETRIES:
+            log.info(f'Waiting {RETRY_SECS}s before retry...')
+            time.sleep(RETRY_SECS)
+    else:
+        log.warning(f'❌ Failed after {MAX_RETRIES} attempts — yes_c never populated')
