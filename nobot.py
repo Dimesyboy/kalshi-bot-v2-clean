@@ -255,10 +255,41 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
         log.warning(f'Not enough legs ({len(tickers)}) — aborting')
         return False
 
-    # Submit RFQ
-    log.info(f'Submitting {len(tickers)}-leg RFQ at target ${target}...')
-    quote, mt = submit_no_rfq(tickers, target, game_filter=game_filter)
-    mt = mt or ''  # collection ticker for accept routing
+    # Step 1: Preview quote to discover no_bid
+    log.info(f'Getting preview quote...')
+    preview, mt = submit_no_rfq(tickers, '1.00', game_filter=game_filter)
+    mt = mt or ''
+    if not preview:
+        log.warning('No preview quote received')
+        return False
+
+    nb_preview = float(preview.get('no_bid_dollars', 0) or 0)
+    if nb_preview <= 0.01:
+        log.warning(f'No valid no_bid: {nb_preview}')
+        return False
+    if nb_preview < 0.08:
+        log.info(f'no_bid {nb_preview:.4f} too cheap — illiquid, skipping')
+        return False
+    if nb_preview > 0.40:
+        log.info(f'no_bid {nb_preview:.4f} too expensive — {1/nb_preview:.2f}x payout, skipping')
+        return False
+
+    # Step 2: Size contracts from desired risk
+    MAX_RISK    = float(target)
+    contracts   = max(1, int(MAX_RISK / nb_preview))
+    actual_cost = round(nb_preview * contracts, 4)
+    payout_x    = round(1.0 / nb_preview, 2)
+    log.info(f'Preview: no_bid={nb_preview:.4f} payout={payout_x:.2f}x')
+    log.info(f'Sizing: {contracts} contracts | risk=${actual_cost:.4f} | win=${contracts:.2f}')
+
+    # Step 3: Submit real RFQ with calculated cost as target
+    log.info(f'Submitting {len(tickers)}-leg RFQ target=${actual_cost:.4f}...')
+    quote, mt2 = submit_no_rfq(tickers, f'{actual_cost:.4f}', game_filter=game_filter)
+    mt = mt2 or mt
+    if not quote:
+        log.warning('No quote received')
+        return False
+
     if not quote:
         log.warning('No quote received')
         return False
