@@ -106,72 +106,65 @@ class Reconciler:
     # ── Sync ───────────────────────────────────────────────────────────
 
     def _record_new_settlements(self, pa):
-        """Check for new settlements and record them to positions_db."""
+        """Check for new settlements via raw HTTP and record to positions_db."""
         try:
             from data.positions_db import record_settlement, get_open_positions
+            from core.portfolio import fetch_settlements
             open_tickers = {p['ticker'] for p in get_open_positions()}
             if not open_tickers:
                 return
 
-            settlements = pa.get_settlements(limit=50)
-            for s in (settlements.settlements or []):
-                ticker  = str(s.ticker or '')
-                revenue = (s.revenue or 0) / 100.0
+            settlements = fetch_settlements(limit=50)
+            for s in settlements:
+                ticker  = s.get('ticker','')
+                revenue = s.get('revenue', 0) / 100.0
                 if ticker in open_tickers:
-                    source = 'bot' if self.is_bot_trade('', '') else 'manual'
+                    order_id = ''
+                    source   = 'bot' if self.is_bot_trade(order_id, '') else 'manual'
                     record_settlement(ticker, revenue, source=source)
-                    log.info(f"[Recon] Settlement recorded: {ticker[-30:]} "
-                            f"revenue=${revenue:.2f}")
+                    log.info(f"[Recon] Settlement: {ticker[-30:]} "
+                             f"revenue=${revenue:.2f} source={source}")
         except Exception as e:
             log.debug(f"[Recon] Settlement recording failed: {e}")
 
     def sync(self):
         """Pull current state from Kalshi and update internal state."""
         try:
-            import kalshi_python
-            from core.kalshi_client import get_client
-            client = get_client()
-            pa     = kalshi_python.PortfolioApi(api_client=client)
+            from core.kalshi_client import get_positions_raw, get_balance
+            from core.portfolio import fetch_orders, fetch_settlements
 
             # ── Positions ─────────────────────────────────────────────
-            resp     = pa.get_positions()
-            all_pos  = resp.positions or []
-            new_pos  = {}
+            all_pos = get_positions_raw()
+            new_pos = {}
 
             for p in all_pos:
-                ticker = str(p.ticker or '')
-                qty    = getattr(p, 'position', 0) or 0
-                cost   = (getattr(p, 'total_cost', 0) or 0) / 100.0
-                value  = (getattr(p, 'market_value', 0) or 0) / 100.0
-
-                if qty == 0:
+                ticker = str(p.get('ticker',''))
+                fp     = float(p.get('position_fp', 0) or 0)
+                if fp == 0:
                     continue
-
-                # Determine side from position sign
-                side = 'yes' if qty > 0 else 'no'
-
-                # Attribution — check fills for this ticker
-                source = self._get_position_source(pa, ticker)
-
+                side   = 'yes' if fp > 0 else 'no'
+                exp    = float(p.get('market_exposure_dollars', 0) or 0)
+                pnl    = float(p.get('realized_pnl_dollars', 0) or 0)
+                source = self._get_position_source_raw(ticker)
                 new_pos[ticker] = Position(
                     ticker       = ticker,
                     side         = side,
-                    qty          = abs(qty),
-                    cost_basis   = abs(cost),
-                    market_value = abs(value),
+                    qty          = abs(fp),
+                    cost_basis   = abs(exp),
+                    market_value = abs(exp),
                     source       = source,
                     entry_time   = datetime.now(timezone.utc).isoformat()[:16],
                 )
 
             # ── Resting orders ────────────────────────────────────────
             try:
-                resting = pa.get_orders(status='resting')
-                resting_count = len(resting.orders or [])
+                orders        = fetch_orders(status='resting')
+                resting_count = len(orders)
             except Exception:
                 resting_count = 0
 
             # ── Settled PNL ───────────────────────────────────────────
-            bot_pnl, manual_pnl = self._calc_settled_pnl(pa)
+            bot_pnl, manual_pnl = self._calc_settled_pnl(None)
 
             # ── Update state ──────────────────────────────────────────
             with self._lock:
@@ -182,7 +175,7 @@ class Reconciler:
                 self._last_sync     = datetime.now(timezone.utc).isoformat()
 
             # Record any new settlements
-            self._record_new_settlements(pa)
+            self._record_new_settlements(None)
 
             self._save_state()
             log.debug(f"[Recon] Synced: {len(new_pos)} positions, "
@@ -193,17 +186,23 @@ class Reconciler:
             log.warning(f"[Recon] Sync failed: {e}")
 
     def _get_position_source(self, pa, ticker: str) -> str:
-        """Check recent fills to attribute position to bot or manual."""
+        """Check positions_db fills to attribute position to bot or manual."""
         try:
-            fills = pa.get_fills(ticker=ticker, limit=5)
-            for fill in (fills.fills or []):
-                order_id  = str(getattr(fill, 'order_id', '') or '')
-                client_id = str(getattr(fill, 'client_order_id', '') or '')
-                if self.is_bot_trade(order_id, client_id):
-                    return 'bot'
-            return 'manual'
+            import sqlite3
+            conn = sqlite3.connect('/root/kalshi-bot-v2/data/positions.db')
+            row  = conn.execute(
+                "SELECT source FROM fills WHERE ticker=? ORDER BY id DESC LIMIT 1",
+                (ticker,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return row[0]
         except Exception:
-            return 'unknown'
+            pass
+        return 'manual'
+
+    def _get_position_source_raw(self, ticker: str) -> str:
+        return self._get_position_source(None, ticker)
 
     def _calc_settled_pnl(self, pa) -> tuple[float, float]:
         """Calculate settled PNL from positions DB."""

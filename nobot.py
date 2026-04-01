@@ -290,10 +290,6 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
         log.warning('No quote received')
         return False
 
-    if not quote:
-        log.warning('No quote received')
-        return False
-
     yb = float(quote.get('yes_bid_dollars',0) or 0)
     yc = float(quote.get('yes_contracts_fp',0) or 0)
     nb = float(quote.get('no_bid_dollars',0) or 0)
@@ -325,6 +321,60 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
         ok, msg = accept_no(quote.get('id',''), collection_ticker=mt)
         if ok:
             log.info(f'PLACED — NO hold cost=${no_cost:.4f} win=${no_win:.4f} ({payout:.2f}x)')
+
+            # Verify actual fill
+            try:
+                import time as _t
+                _t.sleep(2)
+                import requests as _req
+                _r = _req.get(f'{BASE}/trade-api/v2/portfolio/fills',
+                    headers=pss('GET','/trade-api/v2/portfolio/fills'),
+                    params={'limit':1}, timeout=8)
+                _f = _r.json().get('fills',[])[0] if _r.json().get('fills') else {}
+                _side   = _f.get('side','?')
+                _no_p   = float(_f.get('no_price_dollars',0) or 0)
+                _yes_p  = float(_f.get('yes_price_dollars',0) or 0)
+                _count  = float(_f.get('count_fp',0) or 0)
+                _cost   = _no_p*_count if _side=='no' else _yes_p*_count
+                _win    = _count
+                _payout = round(_win/_cost,2) if _cost>0 else 0
+                _order_id = _f.get('order_id','')
+                if _side == 'no':
+                    log.info(f'FILL VERIFIED: side=no count={_count:.0f} cost=${_cost:.4f} win=${_win:.2f} ({_payout:.2f}x) ✅')
+                else:
+                    log.warning(f'FILL WARNING: side={_side} — may be YES position ⚠️')
+
+                # Record to DB
+                try:
+                    from data.positions_db import record_order, record_fill
+                    record_order(
+                        order_id=_order_id, client_order_id=_order_id,
+                        ticker=_f.get('ticker',''), strategy='nobot_no',
+                        side='no', price_cents=int(_no_p*100),
+                        contracts=int(_count), source='bot'
+                    )
+                    record_fill(
+                        ticker=_f.get('ticker',''), order_id=_order_id,
+                        client_order_id=_order_id, side='no',
+                        qty=int(_count), fill_price=int(_no_p*100),
+                        source='bot', strategy='nobot_no',
+                        confidence=0.0, edge=0.0, hit_rate=0.0,
+                        reason=f'NO combo {len(tickers)}-leg payout={_payout:.2f}x'
+                    )
+                    log.info(f'DB recorded: order_id={_order_id[:16]}')
+                except Exception as _dbe:
+                    log.debug(f'DB record failed: {_dbe}')
+
+                # Register with reconciler
+                try:
+                    from core.reconciler import reconciler as _recon
+                    _recon.register_bot_order(_order_id, _order_id)
+                except Exception as _re:
+                    log.debug(f'Reconciler register failed: {_re}')
+
+            except Exception as _fe:
+                log.warning(f'Fill verification failed: {_fe}')
+
             return True
         else:
             log.warning(f'Accept failed: {msg[:80]}')
