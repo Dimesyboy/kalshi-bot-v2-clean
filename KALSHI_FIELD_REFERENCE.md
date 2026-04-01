@@ -248,3 +248,60 @@ If a player in a combo DNPs:
 - Place NO limit orders at YES ask price (from orderbook after RFQ activation)
 - Cancel unfilled orders after 60 seconds
 - Target: 2-3 NBA same-game combos per slate, $1-2 each
+
+---
+
+## Multivariate Collection Types (Confirmed March 31, 2026)
+
+Three collection series available for combo markets:
+
+### 1. KXMVENBASINGLEGAME-{date}{GAME}
+- Single game only — e.g. KXMVENBASINGLEGAME-26MAR31CLELAL
+- Per-game market makers, potentially tighter quotes
+- Collection ticker format: KXMVENBASINGLEGAME-26MAR31CLELAL
+- Best for: same-game combos, higher liquidity per game
+
+### 2. KXMVESPORTSMULTIGAMEEXTENDED-R
+- Cross-game, cross-sport extended
+- What we've been using for all combos
+- Supports legs from multiple games in same slate
+- Best for: multi-game parlays, bigger leg pools
+
+### 3. KXMVECROSSCATEGORY-R
+- Cross-category (sports + non-sports)
+- Untested — may support combining NBA with other markets
+
+### active_quoters Signal
+- Check via: GET /trade-api/v2/multivariate_event_collections?limit=100
+- Filter for game date in associated_event_tickers
+- active_quoters populated = MM online = RFQ will get yes_c
+- Always 0 pre-game (>2hr before tip)
+- Populates ~T-60min to T-15min before tip
+- Returns to 0 once game goes live
+
+### Single Game Collection Flow
+POST /trade-api/v2/multivariate_event_collections/KXMVENBASINGLEGAME-26MAR31CLELAL
+with selected_markets from that game only
+
+---
+
+## Strategy Performance (Confirmed via portfolio_settlements — April 1, 2026)
+
+### Combo Results (EXTENDED markets only)
+| Strategy | W | L | Win% | Avg Win | Avg Cost | Net PnL |
+|----------|---|---|------|---------|----------|---------|
+| NO hold  | 25 | 8 | 76% | $5.83 | $4.29 | +$51.27 |
+| YES hold | 1 | 44 | 2% | $25.00 | $6.74 | -$317.89 |
+
+### Decision
+- **YES holds DISABLED** — 2% win rate, -$318 total loss
+- **NO holds ONLY** — 76% win rate, positive EV per trade
+- Expected value per NO trade: 0.76×$5.83 - 0.24×$4.29 = +$3.40
+- Target: 10 NO holds per night = ~$34 expected profit
+
+### NO Hold Mechanics
+- Accept YES (yes_c > 0) → position_fp negative → holding NO
+- Win when ANY leg fails
+- Best window: T-60min to T-15min before tip (yes_c populates)
+- yes_c = 0 during live games — cannot place new NO holds in-game
+- Optimal: 6-10 legs, mid-range YES (40-72c), multiple games

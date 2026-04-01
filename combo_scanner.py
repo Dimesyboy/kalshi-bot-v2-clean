@@ -600,22 +600,13 @@ def submit_rfq(candidate: ComboCandidate,
             accept_payout = payout_a
             accept_cost   = cost_a
 
-    # Option B: Sell NO (equivalent to buying YES, market maker buys NO from us)
+    # Option B: DISABLED — accept NO gives YES position (2W/42L historically)
+    # Only accept YES (gives NO position, 24W/8L historically)
     if raw_no_bid > 0.01 and no_contracts > 0:
-        # We sell NO: receive no_bid * no_contracts upfront
-        # Risk: if NO wins, we owe (1-no_bid) * no_contracts
-        win_b    = raw_no_bid * no_contracts       # what we win if YES hits
-        cost_b   = (1.0 - raw_no_bid) * no_contracts  # what we lose if NO hits
-        ev_b     = yes_conf * win_b - (1-yes_conf) * cost_b
+        win_b    = raw_no_bid * no_contracts
+        cost_b   = (1.0 - raw_no_bid) * no_contracts
         payout_b = win_b / cost_b if cost_b > 0 else 0
-        log.info(f"[Combo] NO sell option: win=${win_b:.2f} risk=${cost_b:.2f} payout={payout_b:.1f}x EV={ev_b:+.2f}")
-        # Only prefer NO sell if better EV than YES buy
-        if ev_b > 0 and payout_b >= 1.3:
-            if accept_side is None or ev_b > (yes_conf * (accept_payout*accept_cost - accept_cost) - (1-yes_conf) * accept_cost):
-                accept_side   = 'no'
-                accept_price  = raw_no_bid
-                accept_payout = payout_b
-                accept_cost   = cost_b
+        log.info(f"[Combo] NO sell option: win=${win_b:.2f} risk=${cost_b:.2f} payout={payout_b:.1f}x — DISABLED (gives YES position)")
 
     if accept_side is None:
         log.info(f"[Combo] No acceptable side found — EV negative or payout too low")
