@@ -1,7 +1,6 @@
 #!/bin/bash
 # Nobot slate runner — fires NO combos pre-game for all tonight's games
-# Target: 8 legs, $50, ~10c cost, ~$50 win, 500x payout
-# Run: bash run_nobot_slate.sh
+# Target: 3 legs, $1.50 risk, ~$4-6 win, 3-4x payout, EXTENDED collection
 # Cron: 0 22 * * * /root/kalshi-bot-v2/run_nobot_slate.sh
 
 cd /root/kalshi-bot-v2
@@ -13,38 +12,34 @@ echo "=== SLATE $(date) ===" >> $LOG
 
 run_game() {
     local game=$1
-    local target=${2:-50.00}
-    local legs=${3:-8}
+    local target=${2:-1.50}
+    local legs=${3:-3}
     echo "[$(date +%H:%M)] Firing $game target=\$$target legs=$legs" | tee -a $LOG
-    python3 nobot.py $game $target $legs 2>&1 | grep -E "PLACED|yes_c|Payout|Balance|failed|legs" | tee -a $LOG
+    python3 -c "
+import sys
+sys.path.insert(0, '/root/kalshi-bot-v2')
+from nobot import fire_no_combo
+result = fire_no_combo(game_filter='$game', target='$target', label='$game', n_legs=$legs)
+print('SUCCESS' if result else 'FAILED')
+" 2>&1 | grep -E "PLACED|REJECTED|Preview|Sizing|FILL|SUCCESS|FAILED|no_bid|Balance" | tee -a $LOG
     echo "" >> $LOG
 }
 
-# 4pm PT tip (23:00 UTC) — fire at 3pm PT (22:00 UTC)
-run_game PHIWAS 50.00 8
-run_game ATLORL 50.00 8
-
-sleep 60
-
-# 4:30pm PT tip — fire now too
-run_game BOSMIA 50.00 8
-
-sleep 60
+# 4pm PT tip — fire at 3pm PT (22:00 UTC)
+run_game PHIWAS 1.50 3
+run_game ATLORL 1.50 3
+run_game BOSMIA 1.50 3
 
 # 5pm PT tips
-run_game NYKMEM 50.00 8
-run_game SACKTOR 50.00 8
-run_game INDCHI 50.00 8
-run_game MILHOU 50.00 8
-
-sleep 60
+run_game NYKMEM 1.50 3
+run_game SACKTOR 1.50 3
+run_game INDCHI 1.50 3
+run_game MILHOU 1.50 3
 
 # 6pm PT tip
-run_game DENUTА 50.00 8
-
-sleep 60
+run_game DENUTА 1.50 3
 
 # 7pm PT tip
-run_game SASGSW 50.00 8
+run_game SASGSW 1.50 3
 
 echo "=== DONE $(date) ===" | tee -a $LOG
