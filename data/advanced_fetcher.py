@@ -28,6 +28,8 @@ HEADERS  = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X
 
 LEAGUE_AVG_PACE  = 99.0
 LEAGUE_AVG_PTS   = 113.0
+NBAAPI           = 'https://api.server.nbaapi.com/api'
+SEASON           = 2026
 
 # ESPN abbreviation → standard abbreviation mapping
 # Kalshi/standard abbr → ESPN abbr
@@ -93,6 +95,56 @@ def init_advanced_tables():
         days_rest       INTEGER,
         opponent_abbr   TEXT,
         PRIMARY KEY (game_date, team_abbr)
+    );
+
+    CREATE TABLE IF NOT EXISTS injuries (
+        espn_id         TEXT PRIMARY KEY,
+        player_name     TEXT,
+        team_abbr       TEXT,
+        status          TEXT,
+        short_comment   TEXT,
+        long_comment    TEXT,
+        return_date     TEXT,
+        updated_at      TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS depth_charts (
+        espn_id         TEXT,
+        team_abbr       TEXT,
+        player_name     TEXT,
+        position        TEXT,
+        depth_order     INTEGER,
+        is_starter      INTEGER,
+        updated_at      TEXT,
+        PRIMARY KEY (espn_id, team_abbr)
+    );
+
+    CREATE TABLE IF NOT EXISTS player_totals (
+        player_id       TEXT PRIMARY KEY,
+        player_name     TEXT,
+        team            TEXT,
+        position        TEXT,
+        age             INTEGER,
+        games           INTEGER,
+        minutes_pg      REAL,
+        fg_pct          REAL,
+        three_pct       REAL,
+        ft_pct          REAL,
+        off_reb         REAL,
+        def_reb         REAL,
+        reb             REAL,
+        ast             REAL,
+        stl             REAL,
+        blk             REAL,
+        tov             REAL,
+        pts             REAL,
+        per             REAL,
+        ts_pct          REAL,
+        usg_pct_true    REAL,
+        vorp            REAL,
+        win_shares      REAL,
+        season          INTEGER,
+        updated_at      TEXT
     );
     """)
     conn.commit()
@@ -557,7 +609,322 @@ def get_defense_multiplier(opponent_abbr: str, stat: str) -> float:
     return 1.0
 
 
-# ── Main Runner ────────────────────────────────────────────────────────────
+# ── Injuries ──────────────────────────────────────────────────────────────
+
+def fetch_injuries() -> int:
+    """
+    Fetch comprehensive injury/status data from all 30 team rosters.
+    Captures status (active/injured/out) + injury details for every player.
+    More complete than ESPN injuries endpoint which only shows IR list.
+    """
+    log.info("[AdvFetcher] Fetching injuries from rosters...")
+    try:
+        # Get all teams
+        r = requests.get(f"{ESPN_BASE}/teams", headers=HEADERS, timeout=10)
+        teams = []
+        for sport in r.json().get('sports', []):
+            for league in sport.get('leagues', []):
+                for t in league.get('teams', []):
+                    team = t.get('team', {})
+                    teams.append({'id': team.get('id'),
+                                  'abbr': team.get('abbreviation','')})
+
+        now  = datetime.now(timezone.utc).isoformat()[:19]
+        conn = get_db()
+        conn.execute("DELETE FROM injuries")
+        total = 0
+
+        for team in teams:
+            try:
+                r2 = requests.get(
+                    f"{ESPN_BASE}/teams/{team['id']}/roster",
+                    headers=HEADERS, timeout=8)
+                if r2.status_code != 200: continue
+                athletes = r2.json().get('athletes', [])
+
+                for a in athletes:
+                    if not isinstance(a, dict): continue
+                    pid      = a.get('id', '')
+                    name     = a.get('displayName', '')
+                    status   = a.get('status', {})
+                    status_t = status.get('type', 'active') if isinstance(status, dict) else 'active'
+                    status_n = status.get('name', 'Active') if isinstance(status, dict) else 'Active'
+                    injuries = a.get('injuries', [])
+
+                    # Real status is in injuries array, not status field
+                    real_status   = status_n  # default Active
+                    short_comment = ''
+                    long_comment  = ''
+                    return_date   = ''
+                    if injuries and isinstance(injuries, list):
+                        inj = injuries[0]
+                        real_status   = inj.get('status', status_n)
+                        short_comment = inj.get('shortComment', inj.get('description',''))
+                        long_comment  = inj.get('longComment', '')
+                        return_date   = inj.get('date', '')
+
+                    conn.execute("""
+                        INSERT OR REPLACE INTO injuries
+                        (espn_id, player_name, team_abbr, status,
+                         short_comment, long_comment, return_date, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?)
+                    """, (pid, name, team['abbr'], real_status,
+                          short_comment, long_comment, return_date, now))
+                    total += 1
+
+                time.sleep(0.2)
+            except Exception as e:
+                log.debug(f"[AdvFetcher] Roster {team['abbr']}: {e}")
+
+        conn.commit()
+        conn.close()
+        log.info(f"[AdvFetcher] {total} players stored with status")
+
+        # Log non-active players
+        conn2 = get_db()
+        non_active = conn2.execute("""
+            SELECT player_name, team_abbr, status, short_comment
+            FROM injuries WHERE status != 'Active'
+            ORDER BY team_abbr
+        """).fetchall()
+        conn2.close()
+        log.info(f"[AdvFetcher] Non-active players: {len(non_active)}")
+        for row in non_active:
+            log.info(f"  [{row[1]}] {row[0]:25} {row[2]:15} {row[3][:40]}")
+        return total
+
+    except Exception as e:
+        log.warning(f"[AdvFetcher] Injuries failed: {e}")
+        return 0
+
+
+def _espn_id(player_name: str, conn) -> str:
+    """Get ESPN ID for a player name via player_ids table."""
+    nl = player_name.lower().strip()
+    # Exact full name
+    row = conn.execute(
+        'SELECT espn_id FROM player_ids WHERE LOWER(full_name)=? LIMIT 1', (nl,)
+    ).fetchone()
+    if row: return row['espn_id']
+    # Pattern matching on player_key
+    parts = nl.split()
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        for pat in [f'%_{first}{last}', f'%_{first[:2]}{last}',
+                    f'%_{first[0]}{last}', f'%_{last}']:
+            rows = conn.execute(
+                'SELECT espn_id FROM player_ids WHERE player_key LIKE ? LIMIT 5', (pat,)
+            ).fetchall()
+            if len(rows) == 1:
+                return rows[0]['espn_id']
+    return ''
+
+
+def is_player_injured(player_name: str) -> dict:
+    """Check injury status using ESPN ID for accurate lookup."""
+    conn = get_db()
+    try:
+        eid = _espn_id(player_name, conn)
+        row = None
+        if eid:
+            row = conn.execute(
+                'SELECT * FROM injuries WHERE espn_id=?', (eid,)
+            ).fetchone()
+        if not row:
+            row = conn.execute(
+                'SELECT * FROM injuries WHERE LOWER(player_name)=?',
+                (player_name.lower(),)
+            ).fetchone()
+        if row:
+            status = row['status'] or 'Active'
+            return {'injured': status.lower() not in ('active',''),
+                    'status': status, 'comment': row['short_comment'] or '',
+                    'name': row['player_name'], 'espn_id': row['espn_id']}
+        return {'injured': False, 'status': 'Active', 'espn_id': eid}
+    finally:
+        conn.close()
+
+
+def fetch_depth_charts() -> int:
+    """Fetch depth charts for all 30 teams — starter vs bench."""
+    log.info("[AdvFetcher] Fetching depth charts...")
+    try:
+        r = requests.get(f"{ESPN_BASE}/teams", headers=HEADERS, timeout=10)
+        teams = []
+        for sport in r.json().get('sports', []):
+            for league in sport.get('leagues', []):
+                for t in league.get('teams', []):
+                    team = t.get('team', {})
+                    teams.append({'id': team.get('id'), 'abbr': team.get('abbreviation')})
+
+        now   = datetime.now(timezone.utc).isoformat()[:19]
+        conn  = get_db()
+        conn.execute("DELETE FROM depth_charts")
+        total = 0
+        for team in teams:
+            try:
+                r2 = requests.get(
+                    f"{ESPN_BASE}/teams/{team['id']}/depthcharts",
+                    headers=HEADERS, timeout=8)
+                if r2.status_code != 200: continue
+                dc_list = r2.json().get('depthchart', [])
+                if not dc_list: continue
+                positions = dc_list[0].get('positions', {})
+                for pos_key, pos_data in positions.items():
+                    pos = pos_data.get('position', {}).get('abbreviation', pos_key.upper())
+                    for i, athlete in enumerate(pos_data.get('athletes', [])):
+                        conn.execute("""
+                            INSERT OR REPLACE INTO depth_charts
+                            (espn_id, team_abbr, player_name, position,
+                             depth_order, is_starter, updated_at)
+                            VALUES (?,?,?,?,?,?,?)
+                        """, (athlete.get('id',''), team['abbr'],
+                              athlete.get('displayName',''), pos,
+                              i+1, 1 if i==0 else 0, now))
+                        total += 1
+                time.sleep(0.2)
+            except Exception as e:
+                log.debug(f"[AdvFetcher] Depth chart {team['abbr']}: {e}")
+        conn.commit()
+        conn.close()
+        log.info(f"[AdvFetcher] {total} depth chart entries stored")
+        return total
+    except Exception as e:
+        log.warning(f"[AdvFetcher] Depth charts failed: {e}")
+        return 0
+
+
+def is_player_starter(player_name: str) -> bool:
+    """Check if player is in starting lineup."""
+    conn = get_db()
+    try:
+        first = player_name.split()[0]
+        row = conn.execute(
+            "SELECT is_starter FROM depth_charts WHERE player_name LIKE ?",
+            (f"%{first}%",)
+        ).fetchone()
+        return bool(row and row['is_starter'])
+    finally:
+        conn.close()
+
+
+# ── nbaapi.com — True Advanced Stats ──────────────────────────────────────
+
+def fetch_nbaapi_stats() -> int:
+    """
+    Fetch true advanced stats from nbaapi.com.
+    Includes PER, TS%, USG%, VORP, Win Shares.
+    Merges with player totals for complete picture.
+    """
+    log.info("[AdvFetcher] Fetching nbaapi.com stats...")
+    try:
+        # Advanced stats
+        adv_players = {}
+        page = 1
+        while page <= 10:
+            r = requests.get(f"{NBAAPI}/playeradvancedstats",
+                params={'season': SEASON, 'pageSize': 100, 'page': page,
+                        'sortBy': 'vorp', 'ascending': False},
+                headers=HEADERS, timeout=10)
+            if r.status_code != 200: break
+            data  = r.json()
+            batch = data.get('data', [])
+            if not batch: break
+            for p in batch:
+                adv_players[p.get('playerId','')] = p
+            if page >= data.get('pagination',{}).get('pages',1): break
+            page += 1
+            time.sleep(0.3)
+
+        # Player totals
+        tot_players = {}
+        page = 1
+        while page <= 10:
+            r = requests.get(f"{NBAAPI}/playertotals",
+                params={'season': SEASON, 'pageSize': 100, 'page': page,
+                        'sortBy': 'points', 'ascending': False},
+                headers=HEADERS, timeout=10)
+            if r.status_code != 200: break
+            data  = r.json()
+            batch = data.get('data', [])
+            if not batch: break
+            for p in batch:
+                tot_players[p.get('playerId','')] = p
+            if page >= data.get('pagination',{}).get('pages',1): break
+            page += 1
+            time.sleep(0.3)
+
+        log.info(f"[AdvFetcher] adv={len(adv_players)} totals={len(tot_players)}")
+
+        now  = datetime.now(timezone.utc).isoformat()[:19]
+        conn = get_db()
+        count = 0
+        all_ids = set(adv_players) | set(tot_players)
+        for pid in all_ids:
+            adv = adv_players.get(pid, {})
+            tot = tot_players.get(pid, {})
+            merged = {**tot, **adv}  # adv takes precedence
+            if not merged.get('playerName'): continue
+            conn.execute("""
+                INSERT OR REPLACE INTO player_totals
+                (player_id, player_name, team, position, age, games,
+                 minutes_pg, fg_pct, three_pct, ft_pct,
+                 off_reb, def_reb, reb, ast, stl, blk, tov, pts,
+                 per, ts_pct, usg_pct_true, vorp, win_shares,
+                 season, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                pid,
+                merged.get('playerName'),
+                merged.get('team'),
+                merged.get('position'),
+                merged.get('age'),
+                merged.get('games'),
+                merged.get('minutesPg') or merged.get('minutesPlayed',0),
+                merged.get('fieldPercent'),
+                merged.get('threePercent'),
+                merged.get('ftPercent'),
+                merged.get('offensiveRb'),
+                merged.get('defensiveRb'),
+                merged.get('totalRb') or merged.get('totalRBPercent'),
+                merged.get('assists'),
+                merged.get('steals'),
+                merged.get('blocks'),
+                merged.get('turnovers'),
+                merged.get('points'),
+                merged.get('per'),
+                merged.get('tsPercent'),
+                merged.get('usagePercent'),
+                merged.get('vorp'),
+                merged.get('winShares'),
+                SEASON, now,
+            ))
+            count += 1
+        conn.commit()
+        conn.close()
+        log.info(f"[AdvFetcher] {count} players stored in player_totals")
+        return count
+    except Exception as e:
+        log.warning(f"[AdvFetcher] nbaapi fetch failed: {e}")
+        return 0
+
+
+def get_player_injury_check(player_name: str) -> str:
+    """Returns: 'active', 'day-to-day', 'questionable', 'doubtful', 'out'"""
+    info   = is_player_injured(player_name)
+    status = info.get('status', 'Active').lower().strip()
+    if not status or status == 'active':
+        return 'active'
+    if 'day' in status:
+        return 'day-to-day'
+    if 'out' in status or 'injured reserve' in status:
+        return 'out'
+    if 'doubtful' in status:
+        return 'doubtful'
+    if 'questionable' in status:
+        return 'questionable'
+    return 'active'
+
 
 def run_full_fetch():
     log.info("[AdvFetcher] Starting full fetch...")
@@ -567,6 +934,9 @@ def run_full_fetch():
         'team_stats':       fetch_team_stats(),
         'player_advanced':  fetch_player_advanced(),
         'schedule':         fetch_schedule_context(days_ahead=4),
+        'injuries':         fetch_injuries(),
+        'depth_charts':     fetch_depth_charts(),
+        'nbaapi_stats':     fetch_nbaapi_stats(),
     }
 
     log.info(f"[AdvFetcher] Complete: {results}")

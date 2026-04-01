@@ -131,5 +131,18 @@ if __name__ == "__main__":
     warm_player_ids()
     warm_player_averages()
     warm_game_logs()
+
+    # Advanced data
+    log.info("Fetching advanced data...")
+    from data.advanced_fetcher import (
+        init_advanced_tables, run_full_fetch,
+        fetch_injuries, fetch_depth_charts, fetch_nbaapi_stats
+    )
+    init_advanced_tables()
+    fetch_injuries()
+    fetch_depth_charts()
+    fetch_nbaapi_stats()
+    run_full_fetch()
+
     log.info("Done!")
     cache_stats()
