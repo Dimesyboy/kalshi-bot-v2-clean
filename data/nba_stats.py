@@ -376,8 +376,8 @@ def score_prop_leg(ticker: str) -> dict:
 
         confidence = round(hit_rate * 0.70 + ratio_conf * 0.30, 3)
 
-        # Minimum threshold — don't include legs below 65%
-        if confidence < 0.65:
+        # Minimum threshold — don't include legs below 55%
+        if confidence < 0.55:
             confidence = 0.0
     else:
         # Fallback to ratio only
@@ -386,6 +386,32 @@ def score_prop_leg(ticker: str) -> dict:
         elif ratio >= 1.5: confidence = 0.76
         elif ratio >= 1.3: confidence = 0.70
         else:              confidence = 0.0
+
+    # ── Advanced metrics adjustment (USG%, PER from player_totals) ────
+    try:
+        import sqlite3 as _sq
+        _conn = _sq.connect('/root/kalshi-bot-v2/data/cache.db')
+        _conn.row_factory = _sq.Row
+        _pname = avgs.get('player_name','')
+        _row = _conn.execute(
+            'SELECT games, per, usg_pct_true, vorp, pts, ast, reb FROM player_totals WHERE player_name LIKE ? LIMIT 1',
+            (f'%{_pname.split()[0]}%{_pname.split()[-1]}%',)
+        ).fetchone() if _pname else None
+        _conn.close()
+        if _row and _row['games'] and _row['games'] > 0:
+            _games = _row['games']
+            _ppg   = (_row['pts'] or 0) / _games
+            _apg   = (_row['ast'] or 0) / _games
+            _rpg   = (_row['reb'] or 0) / _games
+            _per   = _row['per'] or 15.0
+            _usg   = _row['usg_pct_true'] or 20.0
+            # High usage + high PER = more reliable scorer
+            if _per > 25 and _usg > 30 and confidence > 0:
+                confidence = min(0.97, confidence + 0.03)
+            elif _per < 12 and confidence > 0:
+                confidence = max(0, confidence - 0.05)
+    except Exception:
+        pass
 
     # ── Injury penalty ─────────────────────────────────────────────────
     injury_note = ""
