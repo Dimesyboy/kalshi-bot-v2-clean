@@ -244,7 +244,7 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
                         'ticker':     ticker,
                         'player':     f"{g['away_team']}@{g['home_team']} UNDER {kalshi_line}",
                         'yes_bid':    yb,
-                        'conf':       min(0.99, round(abs(edge_pts)/13.8*0.5+0.5, 3)),
+                        'conf':       __import__('data.game_totals', fromlist=['edge_to_confidence']).edge_to_confidence(edge_pts) / 100,
                         'ask_size':   float(m.get('yes_ask_size_fp',0) or 0),
                         'oi':         float(m.get('open_interest_fp',0) or 0),
                         'vol':        float(m.get('volume_24h_fp',0) or 0),
