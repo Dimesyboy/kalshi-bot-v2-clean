@@ -275,13 +275,6 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
     log.info(f'=== {label} NO combo ===')
     log.info(f'Balance: ${get_balance():.2f}')
 
-    # Check active quoters first
-    active = check_active_quoters(game_filter)
-    if active:
-        log.info(f'Active quoters: {len(active)} events')
-    else:
-        log.info('No active quoters yet — market maker may not be online')
-
     # Get best legs
     tickers = get_best_no_legs(game_filter, n=n_legs)
     if len(tickers) < n_legs:
