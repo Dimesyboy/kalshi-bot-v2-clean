@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
 telegram_bot.py — kalshi-bot-v2
-Telegram control panel with inline keyboards and formatted parlay suggestions.
+Telegram control panel — buttons + slash commands.
 """
 
-import logging
-import os
-import sys
-import csv
-import json
-import requests as req
-from datetime import datetime, timezone
-from collections import defaultdict
+import logging, os, sys, json, time, requests as req
+from datetime import datetime, timezone, timedelta
 
 import sys as _sys
 _sys.path = [p for p in _sys.path if 'kalshi-bot-v2' not in p]
@@ -24,623 +18,523 @@ from core.config import config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("telegram_bot")
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-
-STAT_LABELS = {
-    'KXNBAPTS': 'pts', 'KXNBAREB': 'reb',
-    'KXNBAAST': 'ast', 'KXNBA3PT': '3s',
-    'KXNBASTL': 'stl', 'KXNBABLK': 'blk',
-}
-
-# ── Game schedule cache ────────────────────────────────────────────────────
-
-_game_times = {}
-
-def get_game_times() -> dict:
-    """Return {game_code: tip_time_str} e.g. {'NYKOKC': '7:30 PM ET'}"""
-    global _game_times
-    if _game_times:
-        return _game_times
-    try:
-        from datetime import date
-        today = date.today().strftime("%Y%m%d")
-        r = req.get(
-            f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={today}",
-            timeout=6
-        )
-        for event in r.json().get("events", []):
-            dt_str = event.get("date", "")
-            teams  = event.get("competitions", [{}])[0].get("competitors", [])
-            if len(teams) == 2 and dt_str:
-                t1 = teams[0].get("team", {}).get("abbreviation", "")
-                t2 = teams[1].get("team", {}).get("abbreviation", "")
-                dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                et = dt.astimezone()
-                tip = et.strftime("%-I:%M %p ET")
-                _game_times[f"{t1}{t2}"] = tip
-                _game_times[f"{t2}{t1}"] = tip
-    except Exception as e:
-        log.debug(f"Game times fetch failed: {e}")
-    return _game_times
-
-
-# ── LLM reasoning ──────────────────────────────────────────────────────────
-
-def explain_leg(leg) -> str:
-    if not config.ANTHROPIC_API_KEY:
-        return ""
-    series    = leg.ticker.split('-')[0]
-    stat_name = {'KXNBAPTS':'points','KXNBAREB':'rebounds','KXNBAAST':'assists',
-                 'KXNBA3PT':'threes','KXNBASTL':'steals','KXNBABLK':'blocks'}.get(series,'stat')
-    threshold = leg.ticker.split('-')[-1]
-    prompt = (f"One sentence (max 10 words): why will {leg.reasoning.split(' avg')[0]} "
-              f"get {threshold}+ {stat_name} tonight? Be specific, no fluff.")
-    try:
-        r = req.post(ANTHROPIC_URL, headers={
-            "x-api-key": config.ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }, json={
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 50,
-            "messages": [{"role": "user", "content": prompt}],
-        }, timeout=8)
-        return r.json().get("content", [{}])[0].get("text", "").strip()
-    except Exception:
-        return ""
-
-
-# ── Message formatter ──────────────────────────────────────────────────────
-
-def format_parlay(candidate, legs_with_reasons: list) -> str:
-    import re
-    payout   = candidate.expected_payout
-    conf_pct = candidate.combined_confidence * 100
-    win_amt  = round(5.0 * payout, 0)
-    game_times = get_game_times()
-
-    lines = [
-        f"🎯 *{len(legs_with_reasons)}-leg combo* • *{payout:.1f}x* • {conf_pct:.1f}% conf",
-        f"💰 $5 → *${win_amt:.0f}* if all hit",
-        ""
-    ]
-
-    # Group by game
-    games = {}
-    for leg, reason in legs_with_reasons:
-        m = re.search(r'\d{2}[A-Z]{3}\d{2}([A-Z]{6})', leg.ticker.split('-')[1])
-        code     = m.group(1) if m else "????"
-        t1, t2   = code[:3], code[3:6]
-        tip      = game_times.get(code, "")
-        game_key = f"{t1} vs {t2}"
-        label    = f"{game_key}{' • ' + tip if tip else ''}"
-        games.setdefault(label, []).append((leg, reason))
-
-    for game_label, game_legs in games.items():
-        lines.append(f"🏀 *{game_label}*")
-        for leg, reason in game_legs:
-            series    = leg.ticker.split('-')[0]
-            stat      = STAT_LABELS.get(series, '')
-            threshold = leg.ticker.split('-')[-1]
-            player    = leg.reasoning.split(' avg')[0] if ' avg' in leg.reasoning else ''
-            avg       = leg.reasoning.split('avg ')[1].split(' vs')[0] if 'avg' in leg.reasoning else ''
-            price     = int(leg.implied_prob * 100)
-            edge_str = f" +{int(getattr(leg, 'edge', 0)*100)}¢ edge" if getattr(leg, 'edge', 0) > 0 else ""
-            lines.append(f"• {player} {threshold}+ {stat} _{price}¢_{edge_str} — avg {avg}")
-            if reason:
-                lines.append(f"  _{reason}_")
-        lines.append("")
-
-    return "\n".join(lines)
-
 
 # ── Keyboards ──────────────────────────────────────────────────────────────
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 Moonshot",    callback_data="parlay"),
-         InlineKeyboardButton("💪 Monster",     callback_data="highconf")],
-        [InlineKeyboardButton("🔴 NO Parlay",   callback_data="no_parlay"),
-         InlineKeyboardButton("📊 Stats",       callback_data="stats")],
-        [InlineKeyboardButton("💵 Balance",     callback_data="balance"),
-         InlineKeyboardButton("📋 Positions",   callback_data="positions")],
-        [InlineKeyboardButton("⚙️ Settings",    callback_data="settings"),
-         InlineKeyboardButton("🔬 Model Audit", callback_data="audit")],
-        [InlineKeyboardButton("🔄 Refresh",     callback_data="menu"),
-         InlineKeyboardButton("🔄 Reconcile",   callback_data="reconcile")],
+        [InlineKeyboardButton("💵 Balance",      callback_data="balance"),
+         InlineKeyboardButton("📋 Positions",    callback_data="positions")],
+        [InlineKeyboardButton("📊 PnL",          callback_data="pnl"),
+         InlineKeyboardButton("🔴 Fire Combo",   callback_data="fire_combo")],
+        [InlineKeyboardButton("🏀 Tonight",      callback_data="tonight"),
+         InlineKeyboardButton("⚡ Live Scores",  callback_data="live")],
+        [InlineKeyboardButton("🎯 Props",        callback_data="props"),
+         InlineKeyboardButton("📈 Orderbook",    callback_data="obdata")],
+        [InlineKeyboardButton("🔄 Reconcile",    callback_data="reconcile"),
+         InlineKeyboardButton("⚙️ Settings",     callback_data="settings")],
     ])
 
-def settings_keyboard():
-    max_bet = os.popen("grep MAX_POSITION_USD /root/.env | tail -1").read().strip().split('=')[-1]
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💰 Max Bet: ${max_bet}", callback_data="set_maxbet")],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu")],
-    ])
+def back_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
+
+def refresh_back_keyboard(refresh_data):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Refresh", callback_data=refresh_data),
+        InlineKeyboardButton("🔙 Menu",   callback_data="menu")
+    ]])
 
 
-# ── Command handlers ───────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *Kalshi Bot v2*\nWhat would you like to do?",
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
-    )
-
-async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *Kalshi Bot v2* — What would you like to do?",
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
-    )
+def get_nba_scoreboard(dates=None):
+    from datetime import date
+    d = dates or date.today().strftime('%Y%m%d')
+    r = req.get('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
+        params={'dates': d}, headers={'User-Agent':'Mozilla/5.0'}, timeout=6)
+    return r.json().get('events', [])
 
 
-# ── Callback handlers ──────────────────────────────────────────────────────
+def fmt_games(events, show_live=False, show_all=False):
+    lines = []
+    now   = datetime.now(timezone.utc)
+    for e in events:
+        status = e.get('status',{}).get('type',{}).get('name','')
+        name   = e.get('name','')
+        comps  = e.get('competitions',[{}])[0]
+        teams  = comps.get('competitors',[])
+        detail = e.get('status',{}).get('type',{}).get('shortDetail','')
+        tip    = e.get('date','')
+
+        if status == 'STATUS_SCHEDULED':
+            if show_live: continue
+            dt  = datetime.fromisoformat(tip.replace('Z','+00:00'))
+            pt  = (dt - timedelta(hours=7)).strftime('%-I:%M %p PT')
+            mins = int((dt-now).total_seconds()/60)
+            lines.append(f"🕐 {name[:35]} — {pt} ({mins}min)")
+        elif status == 'STATUS_IN_PROGRESS':
+            score = ' vs '.join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
+            lines.append(f"🔴 {name[:30]} | {score} | {detail}")
+        elif status == 'STATUS_FINAL' and show_all:
+            score = ' vs '.join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
+            lines.append(f"✅ {name[:30]} | FINAL {score}")
+    return lines
+
+
+# ── Callback handler ───────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data  = query.data
 
+    # ── Menu ──────────────────────────────────────────────────────────────
     if data == "menu":
-        await query.edit_message_text(
-            "🤖 *Kalshi Bot v2*",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
-        )
+        await query.edit_message_text("🤖 *Kalshi Bot v2*",
+            parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
-    elif data == "parlay":
-        await query.edit_message_text("🔍 Scanning props...")
-        try:
-            from combo_scanner import scan_all_props, build_best_combo
-            legs      = scan_all_props()
-            candidate = build_best_combo(legs)
-            # Attach edge info to legs for display
-            if candidate:
-                for leg in candidate.legs:
-                    leg.edge = round(leg.confidence - leg.implied_prob, 3)
-            if not candidate:
-                await query.edit_message_text(
-                    "❌ No qualifying combo right now.\nTry closer to game time.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Menu", callback_data="menu")
-                    ]])
-                )
-                return
-            await query.edit_message_text(f"✅ Found {len(candidate.legs)}-leg combo — analysing...")
-            legs_with_reasons = [(leg, explain_leg(leg)) for leg in candidate.legs]
-            msg = format_parlay(candidate, legs_with_reasons)
-            msg += f"\n\n⏳ *Tap Quote to get real payout from market maker*"
-            await query.edit_message_text(
-                msg,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💬 Get Quote", callback_data="quote_moonshot"),
-                     InlineKeyboardButton("🔄 Rescan",   callback_data="parlay")],
-                    [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-                ])
-            )
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "quote_moonshot":
-        await query.edit_message_text("⏳ Fetching quote from market maker... (~5s)")
-        try:
-            from combo_scanner import scan_all_props, build_best_combo, get_rfq_quote
-            legs      = scan_all_props()
-            candidate = build_best_combo(legs)
-            if not candidate:
-                await query.edit_message_text("❌ No combo available",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-                return
-            quote = get_rfq_quote(candidate, stake_dollars=5.0)
-            if quote:
-                side   = quote.get('_best_side','?')
-                payout = quote.get('_best_payout', 0)
-                cost   = quote.get('_best_cost', 5.0)
-                win    = round(cost * payout, 2)
-                context.user_data['pending_quote_id']   = quote.get('id')
-                context.user_data['pending_quote_side'] = side
-                context.user_data['pending_payout']     = payout
-                context.user_data['pending_cost']       = cost
-                await query.edit_message_text(
-                    f"💬 *Moonshot Quote*\n\n"
-                    f"Side: {side.upper()}\n"
-                    f"Cost: ${cost:.2f} → Win: ${win:.2f} ({payout:.1f}x)\n\n"
-                    f"Accept?",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"✅ Accept ${cost:.2f}", callback_data="accept_pending"),
-                         InlineKeyboardButton("⏭ Skip",               callback_data="parlay")],
-                        [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-                    ])
-                )
-            else:
-                await query.edit_message_text("❌ No quote — try closer to game time",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Retry", callback_data="quote_moonshot"),
-                         InlineKeyboardButton("🔙 Menu",  callback_data="menu")]
-                    ]))
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:200]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "highconf":
-        await query.edit_message_text("💪 Building monster combo... (~10s)")
-        try:
-            import asyncio
-            from combo_scanner import scan_all_props, build_highconf_combo
-            legs      = await asyncio.get_event_loop().run_in_executor(None, scan_all_props)
-            candidate = build_highconf_combo(legs)
-            if not candidate:
-                await query.edit_message_text(
-                    "❌ No high confidence combo right now.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-                )
-                return
-            await query.edit_message_text(f"✅ Found {len(candidate.legs)}-leg monster — analysing...")
-            legs_with_reasons = [(leg, explain_leg(leg)) for leg in candidate.legs]
-            msg = format_parlay(candidate, legs_with_reasons)
-            msg += f"\n\n⏳ *Tap Quote to get real payout from market maker*"
-            await query.edit_message_text(
-                msg, parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💬 Get Quote", callback_data="quote_monster"),
-                     InlineKeyboardButton("🔄 Rescan",   callback_data="highconf")],
-                    [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-                ])
-            )
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "quote_monster":
-        await query.edit_message_text("⏳ Fetching quote from market maker... (~5s)")
-        try:
-            from combo_scanner import scan_all_props, build_highconf_combo, get_rfq_quote
-            legs      = scan_all_props()
-            candidate = build_highconf_combo(legs)
-            if not candidate:
-                await query.edit_message_text("❌ No combo available",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-                return
-            quote = get_rfq_quote(candidate, stake_dollars=5.0)
-            if quote:
-                side   = quote.get('_best_side','?')
-                payout = quote.get('_best_payout', 0)
-                cost   = quote.get('_best_cost', 5.0)
-                win    = round(cost * payout, 2)
-                context.user_data['pending_quote_id']   = quote.get('id')
-                context.user_data['pending_quote_side'] = side
-                context.user_data['pending_payout']     = payout
-                context.user_data['pending_cost']       = cost
-                await query.edit_message_text(
-                    f"💬 *Monster Quote*\n\n"
-                    f"Side: {side.upper()}\n"
-                    f"Cost: ${cost:.2f} → Win: ${win:.2f} ({payout:.1f}x)\n\n"
-                    f"Accept?",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"✅ Accept ${cost:.2f}", callback_data="accept_pending"),
-                         InlineKeyboardButton("⏭ Skip",               callback_data="highconf")],
-                        [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-                    ])
-                )
-            else:
-                await query.edit_message_text("❌ No quote — try closer to game time",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Retry", callback_data="quote_monster"),
-                         InlineKeyboardButton("🔙 Menu",  callback_data="menu")]
-                    ]))
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:200]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "no_parlay":
-        await query.edit_message_text("🔴 Building NO combo... scanning high-priced legs...")
-        try:
-            from combo_scanner import scan_all_props, ComboCandidate
-            from collections import defaultdict
-            from datetime import date
-
-            legs    = scan_all_props()
-            tonight_date = date.today().strftime('%y%b%d').upper()
-            tonight = [l for l in legs if tonight_date in l.ticker or
-                       date.today().strftime('%d%b%y').upper() in l.ticker]
-            if not tonight:
-                tonight = legs  # fallback to all legs
-
-            # Build NO combo from highest YES-priced legs
-            tonight.sort(key=lambda x: x.implied_prob, reverse=True)
-            seen = {}
-            for l in tonight:
-                player = l.reasoning.split(' avg')[0] if ' avg' in l.reasoning else l.ticker
-                if player not in seen: seen[player] = l
-            unique = list(seen.values())[:10]
-
-            if len(unique) < 2:
-                await query.edit_message_text(
-                    "❌ Not enough legs for NO combo right now.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-                )
-                return
-
-            candidate = ComboCandidate('KXMVESPORTSMULTIGAMEEXTENDED-R', unique)
-            no_win_prob = round((1 - candidate.combined_confidence) * 100, 1)
-
-            # Calculate actual payout
-            market_cost = 1.0
-            for l in candidate.legs: market_cost *= l.implied_prob
-            actual_payout = round(1/market_cost, 0) if market_cost > 0 else 0
-
-            lines = [
-                f"🔴 *NO Combo* — {len(candidate.legs)} legs",
-                f"💰 Payout: ~{actual_payout:.0f}x on $5 = ${5*actual_payout:.0f}",
-                f"🎯 Win prob: {no_win_prob:.1f}% (at least 1 leg misses)",
-                ""
-            ]
-            for l in candidate.legs:
-                player = l.reasoning.split(' avg')[0] if ' avg' in l.reasoning else l.ticker[-20:]
-                lines.append(f"  YES={l.implied_prob:.2f} — {player}")
-
-            lines += ["", "Submit this NO combo for $5?"]
-
-            # Store candidate in context for buy action
-            context.user_data['no_candidate_legs'] = [l.ticker for l in candidate.legs]
-
-            await query.edit_message_text(
-                "\n".join(lines),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Buy $5 NO", callback_data="buy_no_parlay"),
-                     InlineKeyboardButton("⏭ Skip",      callback_data="no_parlay")],
-                    [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-                ])
-            )
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:200]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "buy_no_parlay":
-        await query.edit_message_text("⏳ Submitting NO combo RFQ...")
-        try:
-            from combo_scanner import scan_all_props, ComboCandidate, submit_rfq
-            from datetime import date
-
-            legs    = scan_all_props()
-            tonight = sorted([l for l in legs], key=lambda x: x.implied_prob, reverse=True)
-            seen = {}
-            for l in tonight:
-                player = l.reasoning.split(' avg')[0] if ' avg' in l.reasoning else l.ticker
-                if player not in seen: seen[player] = l
-            unique = list(seen.values())[:10]
-
-            candidate = ComboCandidate('KXMVESPORTSMULTIGAMEEXTENDED-R', unique)
-            quote     = submit_rfq(candidate, stake_dollars=5.0)
-
-            if quote:
-                side    = quote.get('_accepted_side', '?')
-                payout  = quote.get('_payout', 0)
-                win_amt = round(5 * payout, 2)
-                await query.edit_message_text(
-                    f"✅ *NO Combo Placed!*\nSide: {side.upper()} | Payout: {payout:.1f}x\nWin: ${win_amt:.2f} on $5",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-                )
-            else:
-                await query.edit_message_text(
-                    "❌ No quote received — try closer to game time",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔄 Retry", callback_data="buy_no_parlay"),
-                        InlineKeyboardButton("🔙 Menu",  callback_data="menu")
-                    ]])
-                )
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:200]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "accept_pending":
-        await query.edit_message_text("⏳ Accepting...")
-        try:
-            from combo_scanner import accept_quote
-            from data.positions_db import record_order, record_fill
-            quote_id = context.user_data.get('pending_quote_id') or context.user_data.get('fade_quote_id')
-            side     = context.user_data.get('pending_quote_side') or context.user_data.get('fade_accept_side','no')
-            payout   = context.user_data.get('pending_payout') or context.user_data.get('fade_payout', 0)
-            cost     = context.user_data.get('pending_cost') or context.user_data.get('fade_cost', 0)
-            if not quote_id:
-                await query.edit_message_text("❌ Quote expired — rescan",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-                return
-            result = accept_quote(quote_id, side)
-            if result:
-                win = round(cost * payout, 2)
-                await query.edit_message_text(
-                    f"✅ *Placed!*\nSide: {side.upper()} | Cost: ${cost:.2f}\nWin: ${win:.2f} ({payout:.1f}x)",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-                )
-                # Clear stored quote
-                for k in ['pending_quote_id','pending_quote_side','pending_payout','pending_cost',
-                          'fade_quote_id','fade_accept_side','fade_payout','fade_cost']:
-                    context.user_data.pop(k, None)
-            else:
-                await query.edit_message_text("❌ Accept failed — quote expired",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Rescan", callback_data="menu")]
-                    ]))
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:200]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "reconcile":
-        await query.edit_message_text("🔄 Reconciling account...")
-        try:
-            from core.account_reconciler import run_full_reconcile, get_pnl_summary
-            run_full_reconcile()
-            pnl = get_pnl_summary()
-            await query.edit_message_text(
-                f"✅ *Reconciled*\n\n"
-                f"Fills: {pnl['total_fills']} | Trades: {pnl['total_trades']}\n"
-                f"Revenue: ${pnl['total_revenue']:.2f} | WR: {pnl['win_rate']:.1f}%",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-            )
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "audit":
-        await query.edit_message_text("🔬 Running model audit...")
-        try:
-            from data.model_audit import run_audit, format_audit_telegram
-            report = run_audit(days=7)
-            msg    = format_audit_telegram(report)
-            await query.edit_message_text(
-                msg, parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 Refresh", callback_data="audit"),
-                    InlineKeyboardButton("🔙 Menu",    callback_data="menu")
-                ]])
-            )
-        except Exception as e:
-            await query.edit_message_text(f"❌ Audit error: {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
-    elif data == "stats":
-        try:
-            from core.account_reconciler import run_full_reconcile, get_pnl_summary
-            from core.kalshi_client import get_balance
-            run_full_reconcile()
-            pnl     = get_pnl_summary()
-            balance = get_balance()
-            lines   = [
-                f"📊 *Trading Stats*",
-                f"💰 Balance: ${balance:.2f}",
-                f"📈 Total Revenue: ${pnl['total_revenue']:.2f}",
-                f"🎯 Win Rate: {pnl['win_rate']:.1f}% ({pnl['total_wins']}W/{pnl['total_losses']}L)",
-                f"📋 Total Fills: {pnl['total_fills']}",
-                ""
-            ]
-            for s in pnl.get('by_strategy', []):
-                if not s['strategy'] or s['trades'] == 0: continue
-                wr = s['wins']/s['trades']*100 if s['trades'] > 0 else 0
-                lines.append(f"*{s['strategy']}*: {s['wins']}W/{s['losses']}L ({wr:.0f}%) ${s['revenue']:.2f}")
-            await query.edit_message_text(
-                "\n".join(lines),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 Refresh", callback_data="stats"),
-                    InlineKeyboardButton("🔙 Menu",    callback_data="menu")
-                ]])
-            )
-        except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
-
+    # ── Balance ───────────────────────────────────────────────────────────
     elif data == "balance":
         try:
-            from core.kalshi_client import get_balance
-            balance = get_balance()
-            max_bet = os.popen("grep MAX_POSITION_USD /root/.env | tail -1").read().strip().split('=')[-1]
-            await query.edit_message_text(
-                f"💵 *Balance*\n\nCash: ${balance:.2f}\nMax bet: ${max_bet}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-            )
+            from core.kalshi_client import get_balance, get_positions_raw
+            bal  = get_balance()
+            pos  = get_positions_raw()
+            exp  = sum(abs(float(p.get('market_exposure_dollars',0) or 0)) for p in pos)
+            lines = [f"💵 *Balance*\n",
+                     f"Cash: ${bal:.2f}",
+                     f"Open positions: {len(pos)}",
+                     f"Market exposure: ${exp:.2f}",
+                     f"Total: ${bal+exp:.2f}"]
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("balance"))
         except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 
+    # ── Positions ─────────────────────────────────────────────────────────
     elif data == "positions":
         try:
-            from core.kalshi_client import get_positions_raw, get_balance, get_market_exposure
+            from core.kalshi_client import get_positions_raw, get_balance
             positions = get_positions_raw()
             balance   = get_balance()
-            exposure  = get_market_exposure()
-
-            if positions:
-                combos = [p for p in positions if 'EXTENDED' in p['ticker']]
-                props  = [p for p in positions if any(x in p['ticker']
-                          for x in ['KXNBAPTS','KXNBAREB','KXNBAAST','KXNBA3PT'])]
-                lines  = [
-                    f"📋 *Open Positions* ({len(positions)})",
-                    f"💰 Balance: ${balance:.2f}  |  Exposure: ${exposure:.2f}",
-                    ""
-                ]
-                if combos:
-                    lines.append(f"🎲 *Combos ({len(combos)}):*")
-                    for p in combos[:10]:
-                        fp   = float(p.get('position_fp', 0))
-                        exp  = float(p.get('market_exposure_dollars', 0))
-                        pnl  = float(p.get('realized_pnl_dollars', 0))
-                        side = 'NO' if fp < 0 else 'YES'
-                        pnl_str = f" pnl=${pnl:.2f}" if abs(pnl) > 0.01 else ""
-                        lines.append(f"  {side} {p['ticker'][-22:]} ${exp:.2f}{pnl_str}")
-                if props:
-                    lines.append(f"\n🏀 *Props ({len(props)}):*")
-                    for p in props[:5]:
-                        fp   = float(p.get('position_fp', 0))
-                        exp  = float(p.get('market_exposure_dollars', 0))
-                        side = 'NO' if fp < 0 else 'YES'
-                        lines.append(f"  {side} {p['ticker'][-28:]} ${exp:.2f}")
-                await query.edit_message_text(
-                    "\n".join(lines),
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔄 Refresh", callback_data="positions"),
-                        InlineKeyboardButton("🔙 Menu",   callback_data="menu")
-                    ]])
-                )
-            else:
-                await query.edit_message_text(
-                    f"📋 *No open positions*\n💰 Balance: ${balance:.2f}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
-                )
+            if not positions:
+                await query.edit_message_text(f"📋 No open positions\n💰 Balance: ${balance:.2f}",
+                    reply_markup=back_keyboard())
+                return
+            lines = [f"📋 *Positions ({len(positions)})*  Balance: ${balance:.2f}\n"]
+            for p in positions:
+                fp   = float(p.get('position_fp', 0) or 0)
+                exp  = float(p.get('market_exposure_dollars', 0) or 0)
+                pnl  = float(p.get('realized_pnl_dollars', 0) or 0)
+                side = 'NO' if fp < 0 else 'YES'
+                icon = '🔴' if side == 'NO' else '🟢'
+                t    = p['ticker'][-28:]
+                lines.append(f"{icon} {side} {t} ${abs(exp):.2f}" +
+                             (f" pnl=${pnl:.2f}" if abs(pnl)>0.01 else ""))
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("positions"))
         except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:100]}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 
-    elif data == "settings":
-        await query.edit_message_text(
-            "⚙️ *Settings*\n\nTap to change:",
+    # ── PnL ───────────────────────────────────────────────────────────────
+    elif data == "pnl":
+        try:
+            from data.pnl_report import get_full_pnl, format_report
+            report = get_full_pnl(sync=False)
+            c = report['combos']
+            t = report['today']
+            lines = [
+                f"📊 *Bot PnL Report*\n",
+                f"*Today:* {t['settled']} settled | ${t['pnl']:+.2f}",
+                f"*All time combos:* {c['total']}",
+                f"NO holds: {c['no_wins']}W/{c['no_losses']}L ({c['no_win_rate']}%)",
+                f"YES holds: {c['yes_wins']}W/{c['yes_losses']}L",
+                f"Revenue: ${c['revenue']:.2f} | Cost: ${c['cost']:.2f}",
+                f"*Net PnL: ${c['pnl']:+.2f}*",
+            ]
+            if report.get('best_no_wins'):
+                lines.append("\n🏆 *Best NO wins:*")
+                for w in report['best_no_wins'][:3]:
+                    lines.append(f"  +${w['pnl']:.2f} | {w['date']} | {w['ticker'][-20:]}")
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("pnl"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Fire Combo ────────────────────────────────────────────────────────
+    elif data == "fire_combo":
+        await query.edit_message_text("🔴 *Fire NO Combo*\n\nPick a game or fire on full slate:",
             parse_mode="Markdown",
-            reply_markup=settings_keyboard()
-        )
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 Full Slate", callback_data="fire_slate")],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ]))
+
+    elif data == "fire_slate":
+        await query.edit_message_text("⏳ Scanning and firing NO combo...")
+        try:
+            from nobot import fire_no_combo
+            result = fire_no_combo(game_filter=None, target='1.50', label='TG', n_legs=8)
+            if result:
+                await query.edit_message_text("✅ *NO combo placed!*\nCheck positions for details.",
+                    parse_mode="Markdown", reply_markup=refresh_back_keyboard("positions"))
+            else:
+                await query.edit_message_text("❌ No qualifying combo found.\nTry closer to tip time.",
+                    reply_markup=back_keyboard())
+        except Exception as e:
+            await query.edit_message_text(f"❌ {str(e)[:200]}", reply_markup=back_keyboard())
+
+    # ── Tonight's Games ───────────────────────────────────────────────────
+    elif data == "tonight":
+        try:
+            events = get_nba_scoreboard()
+            lines  = ["🏀 *Tonight's NBA Games*\n"]
+            game_lines = fmt_games(events, show_all=True)
+            if game_lines:
+                lines.extend(game_lines)
+            else:
+                lines.append("No games today")
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("tonight"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Live Scores ───────────────────────────────────────────────────────
+    elif data == "live":
+        try:
+            events = get_nba_scoreboard()
+            live   = fmt_games(events, show_live=True)
+            sched  = fmt_games(events)
+            lines  = ["⚡ *Live Scores*\n"]
+            if live:
+                lines.extend(live)
+            else:
+                lines.append("No live games right now")
+            if sched:
+                lines.append("\n📅 *Upcoming:*")
+                lines.extend(sched[:4])
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("live"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Props ─────────────────────────────────────────────────────────────
+    elif data == "props":
+        try:
+            from core.kalshi_client import _signed_get
+            all_m = []
+            for s in ['KXNBAPTS','KXNBAREB','KXNBAAST']:
+                data2 = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
+                all_m.extend([m for m in data2.get('markets',[])
+                               if float(m.get('open_interest_fp',0) or 0) > 50])
+                time.sleep(0.3)
+            all_m.sort(key=lambda x: float(x.get('open_interest_fp',0) or 0), reverse=True)
+            lines = ["🎯 *Top Props by OI*\n"]
+            for m in all_m[:15]:
+                sub   = (m.get('no_sub_title','') or '').split(':')[0].strip()[:20]
+                yb    = float(m.get('yes_bid_dollars',0) or 0)
+                oi    = float(m.get('open_interest_fp',0) or 0)
+                lines.append(f"YES={yb:.2f} OI={oi:.0f} — {sub}")
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("props"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Orderbook Monitor Stats ───────────────────────────────────────────
+    elif data == "obdata":
+        try:
+            import sqlite3
+            conn = sqlite3.connect('data/orderbook.db', timeout=5)
+            n_snaps = conn.execute('SELECT COUNT(*) FROM market_snapshots').fetchone()[0]
+            n_rfq   = conn.execute('SELECT COUNT(*) FROM combo_rfq_samples').fetchone()[0]
+            latest  = conn.execute('SELECT MAX(snap_time) FROM market_snapshots').fetchone()[0]
+            rfqs    = conn.execute('''SELECT sample_time, no_bid, payout_x, minutes_to_tip
+                                      FROM combo_rfq_samples ORDER BY sample_time DESC LIMIT 5''').fetchall()
+            conn.close()
+            lines = [f"📈 *Orderbook Monitor*\n",
+                     f"Snapshots: {n_snaps:,}",
+                     f"RFQ samples: {n_rfq}",
+                     f"Latest: {str(latest)[11:16]} UTC\n",
+                     "*Recent RFQ samples:*"]
+            for r in rfqs:
+                lines.append(f"  {str(r[0])[11:16]} no_bid={r[1]:.3f} ({r[2]:.1f}x) T-{r[3]:.0f}min")
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("obdata"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Reconcile ─────────────────────────────────────────────────────────
+    elif data == "reconcile":
+        await query.edit_message_text("🔄 Reconciling...")
+        try:
+            from core.reconciler import reconciler
+            reconciler.sync()
+            pos  = reconciler.get_positions()
+            pnl  = reconciler.get_pnl()
+            lines = [f"✅ *Reconcile Complete*\n",
+                     f"Positions: {len(pos)}",
+                     f"Bot PnL: ${pnl['bot_pnl']:+.2f}",
+                     f"Last sync: {str(reconciler.get_last_sync())[11:16]} UTC"]
+            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                reply_markup=back_keyboard())
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Settings ──────────────────────────────────────────────────────────
+    elif data == "settings":
+        await query.edit_message_text("⚙️ *Settings*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💰 Set Max Risk", callback_data="set_maxbet")],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ]))
 
     elif data == "set_maxbet":
         context.user_data['awaiting'] = 'maxbet'
-        await query.edit_message_text(
-            "💰 Enter new max bet amount (e.g. 1.00):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="settings")]])
-        )
+        await query.edit_message_text("💰 Enter max risk per combo (e.g. 1.50):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="settings")]]))
 
+
+# ── Command handlers ───────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 *Kalshi Bot v2*\n\nUse buttons or type /help for commands.",
+        parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 *Kalshi Bot v2*",
+        parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """🤖 *Kalshi Bot v2 — Commands*
+
+*Account*
+/balance — Cash + positions
+/positions — Open positions detail
+/pnl — Bot PnL report
+
+*Games & Props*
+/games — Tonight's NBA schedule
+/live — Live scores + quarter
+/props — Top props by open interest
+/player [name] — Player prop markets
+/nba — All open NBA props with prices
+
+*Bot Control*
+/fire — Fire NO combo (full slate)
+/fire [GAME] — Fire for specific game (e.g. /fire LALOKC)
+
+*Data*
+/obdata — Orderbook monitor stats
+/rfq — Test RFQ quote on current legs
+
+*Help*
+/help — This message"""
+    await update.message.reply_text(help_text, parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from core.kalshi_client import get_balance, get_positions_raw
+    bal = get_balance()
+    pos = get_positions_raw()
+    exp = sum(abs(float(p.get('market_exposure_dollars',0) or 0)) for p in pos)
+    await update.message.reply_text(
+        f"💵 Cash: ${bal:.2f} | Positions: {len(pos)} | Exposure: ${exp:.2f}",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from data.pnl_report import get_full_pnl
+    report = get_full_pnl(sync=False)
+    c = report['combos']
+    t = report['today']
+    text = (f"📊 *PnL Report*\n\n"
+            f"Today: {t['settled']} settled | ${t['pnl']:+.2f}\n"
+            f"All time: {c['no_wins']}W/{c['no_losses']}L NO ({c['no_win_rate']}%)\n"
+            f"Net PnL: ${c['pnl']:+.2f}")
+    await update.message.reply_text(text, parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    events = get_nba_scoreboard()
+    lines  = ["🏀 *Tonight's NBA Games*\n"]
+    lines.extend(fmt_games(events, show_all=True) or ["No games today"])
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    events = get_nba_scoreboard()
+    live   = [l for e in events
+              for l in fmt_games([e], show_live=True)
+              if e.get('status',{}).get('type',{}).get('name','') == 'STATUS_IN_PROGRESS']
+    sched  = fmt_games(events)
+    lines  = ["⚡ *Live Scores*\n"]
+    lines.extend(live or ["No live games"])
+    if sched:
+        lines.append("\n📅 Upcoming:")
+        lines.extend(sched[:4])
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_props(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from core.kalshi_client import _signed_get
+    all_m = []
+    for s in ['KXNBAPTS','KXNBAREB','KXNBAAST']:
+        d = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
+        all_m.extend([m for m in d.get('markets',[])
+                      if float(m.get('open_interest_fp',0) or 0) > 100])
+        time.sleep(0.3)
+    all_m.sort(key=lambda x: float(x.get('open_interest_fp',0) or 0), reverse=True)
+    lines = ["🎯 *Top Props by OI*\n"]
+    for m in all_m[:20]:
+        sub = (m.get('no_sub_title','') or '').split(':')[0].strip()[:22]
+        yb  = float(m.get('yes_bid_dollars',0) or 0)
+        oi  = float(m.get('open_interest_fp',0) or 0)
+        lines.append(f"`{yb:.2f}` OI={oi:.0f} {sub}")
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from core.kalshi_client import _signed_get
+    all_m = []
+    for s in ['KXNBAPTS','KXNBAREB','KXNBAAST','KXNBA3PT','KXNBASTL']:
+        d = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
+        all_m.extend([m for m in d.get('markets',[])
+                      if float(m.get('yes_bid_dollars',0) or 0) > 0.05])
+        time.sleep(0.3)
+    all_m.sort(key=lambda x: float(x.get('yes_bid_dollars',0) or 0), reverse=True)
+    lines = [f"🏀 *All NBA Props ({len(all_m)})*\n"]
+    for m in all_m[:30]:
+        sub  = (m.get('no_sub_title','') or '').split(':')[0].strip()[:20]
+        yb   = float(m.get('yes_bid_dollars',0) or 0)
+        nb   = float(m.get('no_bid_dollars',0) or 0)
+        stat = m['ticker'].split('-')[0].replace('KXNBA','').lower()
+        thr  = m['ticker'].split('-')[-1]
+        lines.append(f"`{yb:.2f}/{nb:.2f}` {sub} {stat} {thr}+")
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_player(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /player [name]\nExample: /player Luka")
+        return
+    name = ' '.join(args).lower()
+    from core.kalshi_client import _signed_get
+    all_m = []
+    for s in ['KXNBAPTS','KXNBAREB','KXNBAAST','KXNBA3PT','KXNBASTL','KXNBABLK']:
+        d = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
+        all_m.extend(d.get('markets',[]))
+        time.sleep(0.2)
+    matches = [m for m in all_m
+               if name in (m.get('no_sub_title','') or '').lower()
+               or name in (m.get('yes_sub_title','') or '').lower()]
+    if not matches:
+        await update.message.reply_text(f"No props found for '{name}'")
+        return
+    matches.sort(key=lambda x: float(x.get('yes_bid_dollars',0) or 0), reverse=True)
+    lines = [f"🎯 *{' '.join(args)} Props*\n"]
+    for m in matches[:20]:
+        sub  = (m.get('no_sub_title','') or '').strip()[:35]
+        yb   = float(m.get('yes_bid_dollars',0) or 0)
+        nb   = float(m.get('no_bid_dollars',0) or 0)
+        oi   = float(m.get('open_interest_fp',0) or 0)
+        lines.append(f"YES={yb:.2f} NO={nb:.2f} OI={oi:.0f} — {sub}")
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    game = context.args[0].upper() if context.args else None
+    label = game or 'SLATE'
+    await update.message.reply_text(f"🔴 Firing NO combo ({label})...")
+    from nobot import fire_no_combo
+    result = fire_no_combo(game_filter=game, target='1.50', label=label, n_legs=8)
+    if result:
+        await update.message.reply_text("✅ NO combo placed! Use /positions to check.",
+            reply_markup=main_menu_keyboard())
+    else:
+        await update.message.reply_text("❌ No qualifying combo. Try closer to tip time.",
+            reply_markup=main_menu_keyboard())
+
+async def cmd_obdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import sqlite3
+    conn    = sqlite3.connect('/root/kalshi-bot-v2/data/orderbook.db', timeout=5)
+    n_snaps = conn.execute('SELECT COUNT(*) FROM market_snapshots').fetchone()[0]
+    n_rfq   = conn.execute('SELECT COUNT(*) FROM combo_rfq_samples').fetchone()[0]
+    latest  = conn.execute('SELECT MAX(snap_time) FROM market_snapshots').fetchone()[0]
+    rfqs    = conn.execute('''SELECT sample_time, no_bid, payout_x, minutes_to_tip
+                              FROM combo_rfq_samples ORDER BY sample_time DESC LIMIT 5''').fetchall()
+    conn.close()
+    lines = [f"📈 *Orderbook Monitor*\n",
+             f"Snapshots: {n_snaps:,} | RFQ: {n_rfq}",
+             f"Latest: {str(latest)[11:16]} UTC\n",
+             "*Recent RFQ samples:*"]
+    for r in rfqs:
+        lines.append(f"  {str(r[0])[11:16]} no_bid={r[1]:.3f} ({r[2]:.1f}x) T-{r[3]:.0f}min")
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from core.kalshi_client import get_positions_raw, get_balance
+    positions = get_positions_raw()
+    balance   = get_balance()
+    if not positions:
+        await update.message.reply_text(f"📋 No open positions\n💰 Balance: ${balance:.2f}",
+            reply_markup=main_menu_keyboard())
+        return
+    lines = [f"📋 *Positions ({len(positions)})*  ${balance:.2f}\n"]
+    for p in positions:
+        fp   = float(p.get('position_fp', 0) or 0)
+        exp  = float(p.get('market_exposure_dollars', 0) or 0)
+        side = 'NO' if fp < 0 else 'YES'
+        icon = '🔴' if side == 'NO' else '🟢'
+        lines.append(f"{icon} {side} {p['ticker'][-28:]} ${abs(exp):.2f}")
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Getting RFQ quote on current best legs...")
+    from nobot import get_best_no_legs, get_collection_ticker, submit_no_rfq
+    tickers = get_best_no_legs(game_filter=None, n=8)
+    if len(tickers) < 2:
+        await update.message.reply_text("❌ Not enough legs available")
+        return
+    preview, mt = submit_no_rfq(tickers, '1.00')
+    if not preview:
+        await update.message.reply_text("❌ No quote received from MM")
+        return
+    nb = float(preview.get('no_bid_dollars',0) or 0)
+    yb = float(preview.get('yes_bid_dollars',0) or 0)
+    nc = float(preview.get('no_contracts_fp',0) or 0)
+    yc = float(preview.get('yes_contracts_fp',0) or 0)
+    payout = round(1/nb, 2) if nb > 0 else 0
+    lines = [f"💬 *RFQ Quote ({len(tickers)} legs)*\n",
+             f"no_bid={nb:.4f} ({payout:.2f}x)",
+             f"yes_bid={yb:.4f} yes_c={yc:.0f}",
+             f"no_c={nc:.0f}",
+             f"Win condition: any leg fails"]
+    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
+        reply_markup=main_menu_keyboard())
+
+
+# ── Text input handler ─────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text input for settings."""
     awaiting = context.user_data.get('awaiting')
-
     if awaiting == 'maxbet':
         try:
             val = float(update.message.text.strip())
             if val <= 0 or val > 100:
-                await update.message.reply_text("❌ Enter a value between 0.01 and 100")
+                await update.message.reply_text("❌ Enter 0.01-100")
                 return
-            # Update .env
             env_path = '/root/.env'
             lines    = open(env_path).readlines()
             lines    = [l for l in lines if not l.startswith('MAX_POSITION_USD=')]
             lines.append(f'MAX_POSITION_USD={val:.2f}\n')
             open(env_path, 'w').writelines(lines)
             context.user_data['awaiting'] = None
-            await update.message.reply_text(
-                f"✅ Max bet updated to ${val:.2f}",
-                reply_markup=main_menu_keyboard()
-            )
+            await update.message.reply_text(f"✅ Max bet updated to ${val:.2f}",
+                reply_markup=main_menu_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ Invalid amount — enter a number like 1.00")
+            await update.message.reply_text("❌ Invalid — enter a number like 1.50")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -651,8 +545,24 @@ def main():
         sys.exit(1)
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu",  cmd_menu))
+
+    # Commands
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("menu",      cmd_menu))
+    app.add_handler(CommandHandler("help",      cmd_help))
+    app.add_handler(CommandHandler("balance",   cmd_balance))
+    app.add_handler(CommandHandler("pnl",       cmd_pnl))
+    app.add_handler(CommandHandler("games",     cmd_games))
+    app.add_handler(CommandHandler("live",      cmd_live))
+    app.add_handler(CommandHandler("props",     cmd_props))
+    app.add_handler(CommandHandler("nba",       cmd_nba))
+    app.add_handler(CommandHandler("player",    cmd_player))
+    app.add_handler(CommandHandler("fire",      cmd_fire))
+    app.add_handler(CommandHandler("obdata",    cmd_obdata))
+    app.add_handler(CommandHandler("positions", cmd_positions))
+    app.add_handler(CommandHandler("rfq",       cmd_rfq))
+
+    # Callbacks + text
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -660,5 +570,5 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
