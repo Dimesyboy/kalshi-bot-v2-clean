@@ -174,11 +174,23 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
         log.debug(f'ESPN schedule check failed: {_ge}')
         log.info(f'Scanning {len(all_m)} markets...')
 
+    # Minimum thresholds — avoid always-hit props (2+ reb, 1+ 3pt, 10+ pts)
+    MIN_THRESHOLDS = {'KXNBAPTS': 12, 'KXNBAREB': 5, 'KXNBAAST': 4,
+                      'KXNBA3PT': 2,  'KXNBASTL': 2, 'KXNBABLK': 2}
+
     scored = []
     for m in all_m:
         yb = float(m.get('yes_bid_dollars',0) or 0)
         if not (yes_min <= yb <= yes_max): continue
         if float(m.get('yes_ask_size_fp',0) or 0) < 50: continue
+
+        # Skip low thresholds that almost always hit
+        series = m.get('ticker','').split('-')[0]
+        try:
+            thresh = int(m.get('ticker','').split('-')[-1])
+            min_thresh = MIN_THRESHOLDS.get(series, 0)
+            if thresh < min_thresh: continue
+        except: pass
 
         result = score_leg_full(m)
         if result:
