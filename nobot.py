@@ -270,7 +270,7 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
     if nb_preview < 0.01:
         log.info(f'no_bid {nb_preview:.4f} too cheap — illiquid, skipping')
         return False
-    if nb_preview > 0.55:
+    if nb_preview > 0.25:
         log.info(f'no_bid {nb_preview:.4f} too expensive — {1/nb_preview:.2f}x payout, skipping')
         return False
 
