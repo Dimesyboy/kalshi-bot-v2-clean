@@ -151,7 +151,28 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
             time.sleep(0.2)
         except: pass
 
-    log.info(f'Scanning {len(all_m)} markets...')
+    # Filter to pre-game markets using ESPN live schedule
+    try:
+        import requests as _req
+        from datetime import datetime as _dt, timezone as _tz
+        _r = _req.get('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
+            headers={'User-Agent':'Mozilla/5.0'}, timeout=5)
+        _pre_abbrs = set()
+        for _e in _r.json().get('events',[]):
+            if _e.get('status',{}).get('type',{}).get('name','') == 'STATUS_SCHEDULED':
+                for _t in _e.get('competitions',[{}])[0].get('competitors',[]):
+                    _pre_abbrs.add(_t['team']['abbreviation'].upper())
+        if _pre_abbrs:
+            pre_game = [m for m in all_m
+                       if any(a in m.get('ticker','').upper() for a in _pre_abbrs)]
+            log.info(f'Pre-game teams: {_pre_abbrs}')
+            log.info(f'Scanning {len(all_m)} markets ({len(pre_game)} pre-game)...')
+            all_m = pre_game if pre_game else all_m
+        else:
+            log.info(f'No pre-game teams found — using all {len(all_m)} markets')
+    except Exception as _ge:
+        log.debug(f'ESPN schedule check failed: {_ge}')
+        log.info(f'Scanning {len(all_m)} markets...')
 
     scored = []
     for m in all_m:
@@ -252,8 +273,18 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
     # Get best legs
     tickers = get_best_no_legs(game_filter, n=n_legs)
     if len(tickers) < n_legs:
-        log.warning(f'Not enough legs ({len(tickers)}) — aborting')
-        return False
+        log.info(f'Only {len(tickers)} legs from {game_filter} — supplementing with full slate')
+        all_tickers = get_best_no_legs(None, n=n_legs*2)
+        existing = set(tickers)
+        for t in all_tickers:
+            if t not in existing and len(tickers) < n_legs:
+                tickers.append(t)
+                existing.add(t)
+        if len(tickers) < 4:
+            log.warning(f'Still not enough legs ({len(tickers)}) — aborting')
+            return False
+        log.info(f'Supplemented to {len(tickers)} legs from full slate')
+
 
     # Step 1: Preview quote to discover no_bid
     log.info(f'Getting preview quote...')
