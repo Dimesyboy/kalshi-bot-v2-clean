@@ -244,7 +244,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "obdata":
         try:
             import sqlite3
-            conn = sqlite3.connect('data/orderbook.db', timeout=5)
+            conn = sqlite3.connect('/root/kalshi-bot-v2/data/orderbook.db', timeout=10)
             n_snaps = conn.execute('SELECT COUNT(*) FROM market_snapshots').fetchone()[0]
             n_rfq   = conn.execute('SELECT COUNT(*) FROM combo_rfq_samples').fetchone()[0]
             latest  = conn.execute('SELECT MAX(snap_time) FROM market_snapshots').fetchone()[0]
@@ -373,26 +373,36 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_props(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from core.kalshi_client import _signed_get
+    from collections import defaultdict
     stat_map = {"KXNBAPTS":"pts","KXNBAREB":"reb","KXNBAAST":"ast","KXNBA3PT":"3pt","KXNBASTL":"stl"}
     all_m = []
     for s in stat_map:
         d = _signed_get(f"/trade-api/v2/markets?series_ticker={s}&limit=200&status=open")
-        all_m.extend([m for m in d.get("markets",[]) if float(m.get("open_interest_fp",0) or 0) > 50])
+        all_m.extend([m for m in d.get("markets",[]) if float(m.get("open_interest_fp",0) or 0) > 30])
         time.sleep(0.3)
-    all_m.sort(key=lambda x: float(x.get("open_interest_fp",0) or 0), reverse=True)
-    lines = ["🎯 Top Props by OI\n"]
-    seen = set()
-    for m in all_m[:25]:
+    # Group by player
+    by_player = defaultdict(lambda: defaultdict(list))
+    for m in all_m:
         sub   = (m.get("no_sub_title","") or "").encode("ascii","ignore").decode()
-        name  = sub.split(":")[0].strip()[:22]
-        thresh = m["ticker"].split("-")[-1]
+        name  = sub.split(":")[0].strip()
         stat  = stat_map.get(m["ticker"].split("-")[0],"?")
+        thresh = m["ticker"].split("-")[-1]
         yb    = float(m.get("yes_bid_dollars",0) or 0)
         oi    = float(m.get("open_interest_fp",0) or 0)
-        key   = f"{name}{stat}{thresh}"
-        if key in seen: continue
-        seen.add(key)
-        lines.append(f"YES={yb:.2f} OI={oi:.0f} — {name} {stat} {thresh}+")
+        by_player[name][stat].append((thresh, yb, oi))
+    # Sort players by total OI
+    player_oi = {p: sum(t[2] for s in stats.values() for t in s) for p,stats in by_player.items()}
+    top_players = sorted(player_oi, key=player_oi.get, reverse=True)[:10]
+    lines = ["🎯 Top Props by Player\n"]
+    for player in top_players:
+        lines.append(f"\n👤 {player}")
+        for stat in ["pts","reb","ast","3pt","stl"]:
+            thresholds = by_player[player].get(stat,[])
+            if not thresholds: continue
+            thresholds.sort(key=lambda x: int(x[0]) if x[0].isdigit() else 0)
+            lines.append(f"  {stat}:")
+            for thresh, yb, oi in thresholds:
+                lines.append(f"    {thresh}+  YES={yb:.2f}  OI={oi:.0f}")
     await update.message.reply_text("\n".join(lines), reply_markup=main_menu_keyboard())
 
 async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE):

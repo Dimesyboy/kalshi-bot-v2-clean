@@ -141,6 +141,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_rfq_game ON combo_rfq_samples(game_codes);
     """)
     conn.commit()
+    # Enable WAL mode — allows concurrent readers without blocking writes
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.commit()
     conn.close()
     log.info("[OBMonitor] DB initialized")
 
