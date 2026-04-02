@@ -104,7 +104,8 @@ def score_leg_full(market):
         model = score_prop_leg(ticker)
         conf  = model.get('confidence', 0)
         player = model.get('player_name', '')
-    except:
+    except Exception as _se:
+        log.debug(f'score_prop_leg failed: {_se}')
         return None
 
     if conf < 0.45: return None
@@ -209,7 +210,7 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
     for l in legs:
         log.info(f'  {l["player"]:25} YES={l["yes_bid"]:.2f} conf={l["conf"]:.2f} '
                  f'smart={l["smart_money"]:.0f} buyp={l["buy_pressure"]:.2f} score={l["composite"]:.3f}')
-    return [l['ticker'] for l in legs]
+    return legs  # full dicts with ticker/conf/composite
 
 
 def get_collection_ticker(tickers, game_filter=None):
@@ -276,20 +277,25 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
     log.info(f'Balance: ${get_balance():.2f}')
 
     # Get best legs
-    tickers = get_best_no_legs(game_filter, n=n_legs)
-    if len(tickers) < n_legs:
-        log.info(f'Only {len(tickers)} legs from {game_filter} — supplementing with full slate')
-        all_tickers = get_best_no_legs(None, n=n_legs*2)
-        existing = set(tickers)
-        for t in all_tickers:
-            if t not in existing and len(tickers) < n_legs:
-                tickers.append(t)
-                existing.add(t)
-        if len(tickers) < 4:
-            log.warning(f'Still not enough legs ({len(tickers)}) — aborting')
+    leg_dicts = get_best_no_legs(game_filter, n=n_legs)
+    if len(leg_dicts) < n_legs:
+        log.info(f'Only {len(leg_dicts)} legs from {game_filter} — supplementing')
+        all_legs = get_best_no_legs(None, n=n_legs*2)
+        existing = {l['ticker'] for l in leg_dicts}
+        for l in all_legs:
+            if l['ticker'] not in existing and len(leg_dicts) < n_legs:
+                leg_dicts.append(l)
+                existing.add(l['ticker'])
+        if len(leg_dicts) < 4:
+            log.warning(f'Still not enough legs ({len(leg_dicts)}) — aborting')
             return False
-        log.info(f'Supplemented to {len(tickers)} legs from full slate')
+        log.info(f'Supplemented to {len(leg_dicts)} legs')
 
+    tickers   = [l['ticker'] for l in leg_dicts]
+    avg_conf  = round(sum(l['conf'] for l in leg_dicts) / len(leg_dicts), 3)
+    avg_score = round(sum(l['composite'] for l in leg_dicts) / len(leg_dicts), 3)
+    min_conf  = round(min(l['conf'] for l in leg_dicts), 3)
+    log.info(f'Combo stats: avg_conf={avg_conf} min_conf={min_conf} avg_score={avg_score}')
 
     # Step 1: Preview quote to discover no_bid
     log.info(f'Getting preview quote...')
@@ -394,7 +400,7 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
                         client_order_id=_order_id, side='no',
                         qty=int(_count), fill_price=int(_no_p*100),
                         source='bot', strategy='nobot_no',
-                        confidence=0.0, edge=0.0, hit_rate=0.0,
+                        confidence=avg_conf, edge=avg_score, hit_rate=min_conf,
                         reason=f'NO combo {len(tickers)}-leg payout={_payout:.2f}x'
                     )
                     log.info(f'DB recorded: order_id={_order_id[:16]}')
