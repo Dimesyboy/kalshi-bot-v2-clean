@@ -47,25 +47,44 @@ def get_full_pnl(days: int = None, sync: bool = True) -> dict:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()[:10]
         date_filter = f"AND settled_time >= '{cutoff}'"
 
-    # ── Combo settlements (EXTENDED) ──────────────────────────────────
+    # ── Bot combo settlements — attributed via is_bot flag ────────────
     combo_rows = conn.execute(f"""
         SELECT ticker, event_ticker, settled_time, market_result,
                yes_count_fp, no_count_fp, yes_cost, no_cost,
-               revenue, fee_cost, pnl, is_combo
+               revenue, fee_cost, pnl, is_combo,
+               COALESCE(is_bot, 0) as is_bot
         FROM portfolio_settlements
         WHERE is_combo=1 {date_filter}
         ORDER BY settled_time DESC
     """).fetchall()
 
-    # ── Single market settlements ─────────────────────────────────────
+    # Bot combos: is_bot=1 preferred, fallback to date >= Mar 30
+    bot_combo_rows = [r for r in combo_rows
+                      if r['is_bot'] == 1 or str(r['settled_time']) >= '2026-03-30']
+
+    # ── Single market settlements — bot only ─────────────────────────
     single_rows = conn.execute(f"""
         SELECT ticker, settled_time, market_result,
                yes_count_fp, no_count_fp, yes_cost, no_cost,
-               revenue, fee_cost, pnl
+               revenue, fee_cost, pnl,
+               COALESCE(is_bot, 0) as is_bot
         FROM portfolio_settlements
-        WHERE is_combo=0 {date_filter}
+        WHERE is_combo=0
+        AND COALESCE(is_bot, 0) = 1
+        {date_filter}
         ORDER BY settled_time DESC
     """).fetchall()
+
+    # Manual history — not attributed to bot
+    manual_rows = conn.execute("""
+        SELECT ticker, settled_time, market_result,
+               yes_cost, no_cost, revenue, pnl
+        FROM portfolio_settlements
+        WHERE COALESCE(is_bot, 0) = 0
+        ORDER BY settled_time DESC
+    """).fetchall()
+
+    conn.close()
 
     conn.close()
 
@@ -110,18 +129,18 @@ def get_full_pnl(days: int = None, sync: bool = True) -> dict:
             'pnl':      round(total_rev - total_cost, 2),
         }
 
-    combos  = analyze_combos(combo_rows)
+    combos  = analyze_combos(bot_combo_rows)
     singles = analyze_singles(single_rows)
 
     # Best NO wins
     best_no = sorted(
-        [r for r in combo_rows if r['no_count_fp'] > 0 and r['revenue'] > 0],
+        [r for r in bot_combo_rows if r['no_count_fp'] > 0 and r['revenue'] > 0],
         key=lambda r: r['pnl'], reverse=True
     )[:5]
 
     # Today's activity
     today = date.today().isoformat()
-    today_combos = [r for r in combo_rows if str(r['settled_time']).startswith(today)]
+    today_combos = [r for r in bot_combo_rows if str(r['settled_time']).startswith(today)]
     today_rev    = sum(r['revenue'] for r in today_combos)
     today_cost   = sum((r['yes_cost'] or 0)+(r['no_cost'] or 0) for r in today_combos)
     today_pnl    = today_rev - today_cost

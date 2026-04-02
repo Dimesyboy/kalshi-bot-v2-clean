@@ -132,17 +132,23 @@ if __name__ == "__main__":
     warm_player_averages()
     warm_game_logs()
 
-    # Advanced data
+    # Advanced data — run_full_fetch covers team stats, player advanced, schedule
+    # fetch_injuries, fetch_depth_charts, fetch_nbaapi_stats run separately first
+    # so they are available even if run_full_fetch fails partway through
     log.info("Fetching advanced data...")
     from data.advanced_fetcher import (
-        init_advanced_tables, run_full_fetch,
-        fetch_injuries, fetch_depth_charts, fetch_nbaapi_stats
+        init_advanced_tables, fetch_injuries,
+        fetch_depth_charts, fetch_nbaapi_stats, fetch_team_stats,
+        fetch_player_advanced, fetch_schedule_context
     )
     init_advanced_tables()
     fetch_injuries()
     fetch_depth_charts()
     fetch_nbaapi_stats()
-    run_full_fetch()
+    fetch_team_stats()
+    fetch_player_advanced()
+    fetch_schedule_context(days_ahead=4)
+
 
     log.info("Done!")
     cache_stats()

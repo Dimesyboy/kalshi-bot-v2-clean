@@ -300,6 +300,7 @@ def run_bot():
         get_date_fn       = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         trade_log_fn      = log_trade,
     )
+    watcher.enabled = False  # disabled — not exiting positions early
     watcher.start()
 
     # ── Startup reconcile ──────────────────────────────────────────────────

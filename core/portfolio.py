@@ -159,8 +159,10 @@ def init_portfolio_tables():
             fee_cost        REAL,
             pnl             REAL,
             is_combo        INTEGER,
+            is_bot          INTEGER DEFAULT 0,
             created_at      TEXT DEFAULT (datetime('now'))
         );
+
         CREATE INDEX IF NOT EXISTS idx_sett_time   ON portfolio_settlements(settled_time);
         CREATE INDEX IF NOT EXISTS idx_sett_result ON portfolio_settlements(market_result);
 
@@ -172,6 +174,17 @@ def init_portfolio_tables():
         );
     """)
     conn.commit()
+
+    # ── Migrations ─────────────────────────────────────────────────────
+    # Add is_bot column if upgrading from older schema
+    try:
+        conn.execute("ALTER TABLE portfolio_settlements ADD COLUMN is_bot INTEGER DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sett_is_bot ON portfolio_settlements(is_bot)")
+        conn.commit()
+        log.info("[Portfolio] Migration: added is_bot column to portfolio_settlements")
+    except Exception:
+        pass  # column already exists
+
     conn.close()
     log.debug("Portfolio tables initialized")
 
@@ -310,10 +323,36 @@ def sync_fills():
     return fills, new
 
 
+def _load_bot_order_ids() -> set:
+    """Load bot order IDs from bot_orders.json for attribution."""
+    import json as _json
+    try:
+        data = _json.load(open('/root/kalshi-bot-v2/data/bot_orders.json'))
+        return set(data.get('orders',[]) if isinstance(data,dict) else data)
+    except Exception:
+        return set()
+
+
+def _build_ticker_to_orderid(fills: list) -> dict:
+    """Map ticker → order_id from fills list."""
+    mapping = {}
+    for f in fills:
+        ticker   = f.get('ticker','')
+        order_id = f.get('order_id','')
+        if ticker and order_id and ticker not in mapping:
+            mapping[ticker] = order_id
+    return mapping
+
+
 def sync_settlements():
-    settlements = fetch_settlements()
-    conn        = get_db()
-    new         = 0
+    """Sync all settlements with bot/manual attribution via is_bot flag."""
+    bot_ids         = _load_bot_order_ids()
+    fills           = fetch_fills()
+    ticker_to_order = _build_ticker_to_orderid(fills)
+    settlements     = fetch_settlements()
+
+    conn = get_db()
+    new  = 0
     for s in settlements:
         try:
             ticker   = s.get('ticker','')
@@ -323,12 +362,14 @@ def sync_settlements():
             fee      = float(s.get('fee_cost', 0) or 0)
             pnl      = rev - yes_cost - no_cost - fee
             is_combo = 1 if 'EXTENDED' in ticker or 'SINGLEGAME' in ticker else 0
+            order_id = ticker_to_order.get(ticker, '')
+            is_bot   = 1 if (order_id and order_id in bot_ids) else 0
             conn.execute("""
                 INSERT OR REPLACE INTO portfolio_settlements
                 (ticker, event_ticker, settled_time, market_result,
                  yes_count_fp, no_count_fp, yes_cost, no_cost,
-                 revenue, fee_cost, pnl, is_combo)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 revenue, fee_cost, pnl, is_combo, is_bot)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 ticker,
                 s.get('event_ticker',''),
@@ -336,7 +377,7 @@ def sync_settlements():
                 s.get('market_result',''),
                 float(s.get('yes_count_fp', 0) or 0),
                 float(s.get('no_count_fp', 0) or 0),
-                yes_cost, no_cost, rev, fee, pnl, is_combo,
+                yes_cost, no_cost, rev, fee, pnl, is_combo, is_bot,
             ))
             new += 1
         except Exception as e:

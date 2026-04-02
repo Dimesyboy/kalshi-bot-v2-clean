@@ -1,6 +1,6 @@
 #!/bin/bash
 # Nobot slate runner — fires NO combos pre-game for all tonight's games
-# Target: 3 legs, $1.50 risk, ~$4-6 win, 3-4x payout, EXTENDED collection
+# Target: 8 legs, $1.50 risk, ~$4-6 win, 3-4x payout, EXTENDED collection
 # Cron: 0 22 * * * /root/kalshi-bot-v2/run_nobot_slate.sh
 
 cd /root/kalshi-bot-v2
@@ -13,7 +13,7 @@ echo "=== SLATE $(date) ===" >> $LOG
 run_game() {
     local game=$1
     local target=${2:-1.50}
-    local legs=${3:-3}
+    local legs=${3:-8}
     echo "[$(date +%H:%M)] Firing $game target=\$$target legs=$legs" | tee -a $LOG
     python3 -c "
 import sys

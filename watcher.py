@@ -65,6 +65,9 @@ class PriceWatcher:
         )
 
     def start(self):
+        if not getattr(self, "enabled", True):
+            log.info("[Watcher] DISABLED — skipping start")
+            return
         log.info("[Watcher] Starting (2s poll)")
         self._thread.start()
 
