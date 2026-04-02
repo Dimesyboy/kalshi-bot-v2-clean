@@ -271,8 +271,11 @@ def accept_no(quote_id, collection_ticker=''):
     return r.status_code in (200, 204), r.text
 
 
-def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
+def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
     """Full flow: scan → RFQ → quote → accept YES → hold NO."""
+    import os
+    if target is None:
+        target = os.environ.get('NOBOT_TARGET', os.environ.get('MAX_POSITION_USD', '1.50'))
     log.info(f'=== {label} NO combo ===')
     log.info(f'Balance: ${get_balance():.2f}')
 

@@ -115,14 +115,35 @@ def update_expected_totals(days_back: int = 30):
 
 def get_tonight_edges() -> list:
     """Return tonight's games with model vs Kalshi edge."""
+    return get_edges_for_date(date.today().strftime('%Y%m%d'))
+
+
+def get_edges_for_date(date_str: str) -> list:
+    """Return games for a specific date with all stats."""
     conn = get_db()
-    today = date.today().strftime('%Y%m%d')
-    rows  = conn.execute('''
-        SELECT game_id, home_team, away_team, exp_total
+    rows = conn.execute('''
+        SELECT game_id, game_date, home_team, away_team,
+               exp_total, total_points, edge
         FROM game_totals
         WHERE game_date = ? AND exp_total > 0
         ORDER BY exp_total ASC
-    ''', (today,)).fetchall()
+    ''', (date_str,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_recent_edges(days: int = 3) -> list:
+    """Return games from last N days with results where available."""
+    conn = get_db()
+    from datetime import timedelta
+    cutoff = (date.today() - timedelta(days=days)).strftime('%Y%m%d')
+    rows = conn.execute('''
+        SELECT game_id, game_date, home_team, away_team,
+               exp_total, total_points, edge
+        FROM game_totals
+        WHERE game_date >= ? AND exp_total > 0
+        ORDER BY game_date DESC, exp_total ASC
+    ''', (cutoff,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

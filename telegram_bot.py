@@ -29,8 +29,8 @@ def main_menu_keyboard():
          InlineKeyboardButton("🔴 Fire Combo",   callback_data="fire_combo")],
         [InlineKeyboardButton("🏀 Tonight",      callback_data="tonight"),
          InlineKeyboardButton("⚡ Live Scores",  callback_data="live")],
-        [InlineKeyboardButton("🎯 Props",        callback_data="props"),
-         InlineKeyboardButton("📈 Orderbook",    callback_data="obdata")],
+        [InlineKeyboardButton("📐 Totals",       callback_data="totals"),
+         InlineKeyboardButton("🎯 Props",        callback_data="props")],
         [InlineKeyboardButton("🔄 Reconcile",    callback_data="reconcile"),
          InlineKeyboardButton("⚙️ Settings",     callback_data="settings")],
     ])
@@ -280,6 +280,53 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 
     # ── Reconcile ─────────────────────────────────────────────────────────
+    elif data == "totals":
+        try:
+            from data.game_totals import get_recent_edges
+            from core.kalshi_client import _signed_get
+            from collections import defaultdict
+            data2 = _signed_get("/trade-api/v2/markets?series_ticker=KXNBATOTAL&limit=200&status=open")
+            kalshi_lines = {}
+            by_game2 = defaultdict(list)
+            for m in data2.get("markets",[]):
+                game = m["ticker"].split("-")[1][5:]
+                yb   = float(m.get("yes_bid_dollars",0) or 0)
+                thresh = int(m["ticker"].split("-")[-1])
+                by_game2[game].append((thresh, yb))
+            for game, glines in by_game2.items():
+                fair = min(glines, key=lambda x: abs(x[1]-0.50))
+                kalshi_lines[game] = fair[0]
+            edges = get_recent_edges(days=3)
+            out   = []
+            cur_date = None
+            for g in edges:
+                gdate = str(g["game_date"])
+                if gdate != cur_date:
+                    from datetime import datetime as _dt
+                    label = _dt.strptime(gdate, "%Y%m%d").strftime("%a %b %-d")
+                    out.append(f"\n{label}")
+                    cur_date = gdate
+                key    = g["away_team"]+g["home_team"]
+                line   = kalshi_lines.get(key)
+                actual = g["total_points"]
+                exp    = g["exp_total"]
+                if line:
+                    edge = round(exp - line, 1)
+                    dir  = "UNDER" if edge < -5 else "OVER" if edge > 5 else "FAIR"
+                    conf = min(99, round(abs(edge)/13.8*50+50))
+                    result = f"actual={actual}" if actual and actual > 0 else "pending"
+                    bet = f"NO {line}+" if dir=="UNDER" else f"YES {line-3}+" if dir=="OVER" else ""
+                    ls = f"{g['away_team']}@{g['home_team']}: exp={exp:.0f} line={line} {dir}{edge:+.0f} ({conf}%) {result}"
+                    if bet: ls += f" | {bet}"
+                else:
+                    result = f"actual={actual}" if actual and actual > 0 else "pending"
+                    ls = f"{g['away_team']}@{g['home_team']}: exp={exp:.0f} | {result}"
+                out.append(ls)
+            msg = "\n".join(out) if out else "No data yet"
+            await query.edit_message_text(msg, reply_markup=refresh_back_keyboard("totals"))
+        except Exception as e:
+            await query.edit_message_text(f"Error: {str(e)[:200]}", reply_markup=back_keyboard())
+
     elif data == "reconcile":
         await query.edit_message_text("🔄 Reconciling...")
         try:
@@ -569,41 +616,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Main ───────────────────────────────────────────────────────────────────
 
 async def cmd_totals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show tonight game total model vs Kalshi edges."""
-    from data.game_totals import get_tonight_edges
+    from data.game_totals import get_recent_edges
     from core.kalshi_client import _signed_get
-    import time
-
-    # Get Kalshi fair lines
-    data = _signed_get('/trade-api/v2/markets?series_ticker=KXNBATOTAL&limit=200&status=open')
     from collections import defaultdict
+    data2 = _signed_get("/trade-api/v2/markets?series_ticker=KXNBATOTAL&limit=200&status=open")
     kalshi_lines = {}
     by_game = defaultdict(list)
-    for m in data.get('markets',[]):
-        game = m['ticker'].split('-')[1][5:]
-        yb   = float(m.get('yes_bid_dollars',0) or 0)
-        thresh = int(m['ticker'].split('-')[-1])
+    for m in data2.get("markets",[]):
+        game = m["ticker"].split("-")[1][5:]
+        yb   = float(m.get("yes_bid_dollars",0) or 0)
+        thresh = int(m["ticker"].split("-")[-1])
         by_game[game].append((thresh, yb))
-    for game, lines2 in by_game.items():
-        fair = min(lines2, key=lambda x: abs(x[1]-0.50))
+    for game, glines in by_game.items():
+        fair = min(glines, key=lambda x: abs(x[1]-0.50))
         kalshi_lines[game] = fair[0]
-
-    edges = get_tonight_edges()
-    lines_out = ["Tonight Game Totals\n"]
+    edges = get_recent_edges(days=3)
+    out   = []
+    cur_date = None
     for g in edges:
-        key  = g['away_team']+g['home_team']
+        gdate = str(g["game_date"])
+        if gdate != cur_date:
+            from datetime import datetime
+            label = datetime.strptime(gdate, "%Y%m%d").strftime("%a %b %-d")
+            out.append(f"\n{label}")
+            cur_date = gdate
+        key  = g["away_team"]+g["home_team"]
         line = kalshi_lines.get(key)
-        if not line: continue
-        edge = round(g['exp_total'] - line, 1)
-        dir  = 'UNDER' if edge < -5 else 'OVER' if edge > 5 else 'FAIR'
-        conf = min(99, round(abs(edge)/13.8*50+50))
-        icon = 'UNDER' if dir=='UNDER' else 'OVER' if dir=='OVER' else 'FAIR'
-        bet  = f"NO on {line}+" if dir=='UNDER' else f"YES on {line-3}+" if dir=='OVER' else 'skip'
-        lines_out.append(f"{g['away_team']}@{g['home_team']}: model={g['exp_total']:.0f} line={line} {icon} {edge:+.1f} ({conf}%)")
-        if dir != 'FAIR':
-            lines_out.append(f"  Bet: {bet}")
-    await update.message.reply_text("\n".join(lines_out), reply_markup=main_menu_keyboard())
-
+        actual = g["total_points"]
+        exp    = g["exp_total"]
+        if line:
+            edge = round(exp - line, 1)
+            dir  = "UNDER" if edge < -5 else "OVER" if edge > 5 else "FAIR"
+            conf = min(99, round(abs(edge)/13.8*50+50))
+            result = f"actual={actual}" if actual and actual > 0 else "pending"
+            bet = f"NO {line}+" if dir=="UNDER" else f"YES {line-3}+" if dir=="OVER" else ""
+            line_str = f"{g['away_team']}@{g['home_team']}: exp={exp:.0f} line={line} {dir}{edge:+.0f} ({conf}%) {result}"
+            if bet: line_str += f" | {bet}"
+        else:
+            result = f"actual={actual}" if actual and actual > 0 else "pending"
+            line_str = f"{g['away_team']}@{g['home_team']}: exp={exp:.0f} no line | {result}"
+        out.append(line_str)
+    msg = "\n".join(out) if out else "No data — try again shortly"
+    await update.message.reply_text(msg, reply_markup=main_menu_keyboard())
 
 def main():
     if not config.TELEGRAM_BOT_TOKEN:
