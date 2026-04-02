@@ -221,6 +221,7 @@ def snapshot_markets():
 
     # Fetch all open prop markets
     all_m = []
+    # NBA props
     for series in ['KXNBAPTS', 'KXNBAREB', 'KXNBAAST', 'KXNBA3PT', 'KXNBASTL', 'KXNBABLK']:
         try:
             data = _signed_get(f'/trade-api/v2/markets?series_ticker={series}&limit=200&status=open')
@@ -230,6 +231,15 @@ def snapshot_markets():
             time.sleep(0.1)
         except Exception as e:
             log.debug(f"Market fetch failed {series}: {e}")
+
+    # MLB props — fetch all open regardless of pre_game_teams filter
+    for series in ['KXMLBPTS', 'KXMLBSTK', 'KXMLBHR', 'KXMLBRBI', 'KXMLBHIT']:
+        try:
+            data = _signed_get(f'/trade-api/v2/markets?series_ticker={series}&limit=200&status=open')
+            all_m.extend(data.get('markets', []))
+            time.sleep(0.1)
+        except Exception as e:
+            log.debug(f"MLB market fetch failed {series}: {e}")
 
     if not all_m:
         log.debug("[OBMonitor] No pre-game markets found")
@@ -402,12 +412,35 @@ def sample_combo_rfq():
 
 
 # ── Runner ─────────────────────────────────────────────────────────────────
+RETENTION_DAYS = 30  # keep 30 days of data
+
+
+def purge_old_data():
+    """Delete data older than RETENTION_DAYS to manage disk usage."""
+    from datetime import date, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()[:19]
+    conn = get_db()
+    for table in ['market_snapshots', 'orderbook_depth', 'combo_rfq_samples']:
+        try:
+            r = conn.execute(f"DELETE FROM {table} WHERE created_at < ?", (cutoff,))
+            if r.rowcount > 0:
+                log.info(f"[OBMonitor] Purged {r.rowcount} rows from {table}")
+        except Exception as e:
+            log.debug(f"Purge failed {table}: {e}")
+    conn.execute("VACUUM")
+    conn.commit()
+    conn.close()
+
+
 def run_monitor():
     """Main monitoring loop."""
     init_db()
     log.info(f"[OBMonitor] Starting — snap every {SNAP_INTERVAL}s, RFQ every {RFQ_INTERVAL}s")
 
-    last_rfq = 0
+    last_rfq   = 0
+    last_purge = 0
+    PURGE_INTERVAL = 3600  # purge once per hour
+
     while True:
         try:
             snapshot_markets()
@@ -416,6 +449,11 @@ def run_monitor():
             if time.time() - last_rfq >= RFQ_INTERVAL:
                 sample_combo_rfq()
                 last_rfq = time.time()
+
+            # Retention purge
+            if time.time() - last_purge >= PURGE_INTERVAL:
+                purge_old_data()
+                last_purge = time.time()
 
         except Exception as e:
             log.warning(f"[OBMonitor] Loop error: {e}")
