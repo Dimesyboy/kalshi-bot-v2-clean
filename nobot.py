@@ -210,6 +210,55 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
     for l in legs:
         log.info(f'  {l["player"]:25} YES={l["yes_bid"]:.2f} conf={l["conf"]:.2f} '
                  f'smart={l["smart_money"]:.0f} buyp={l["buy_pressure"]:.2f} score={l["composite"]:.3f}')
+    # ── Supplement with game total UNDER legs if strong model edge ──────
+    try:
+        from data.game_totals import get_tonight_edges
+        from core.kalshi_client import _signed_get as _sg
+        import time as _t
+
+        edges      = get_tonight_edges()
+        total_data = _sg('/trade-api/v2/markets?series_ticker=KXNBATOTAL&limit=200&status=open')
+        total_mkts = {m['ticker']: m for m in total_data.get('markets',[])}
+
+        for g in edges:
+            # Only use strong UNDER edges (model < kalshi - 5)
+            # Find Kalshi fair line for this game
+            game_key = g['away_team'] + g['home_team']
+            game_mkts = [(int(t.split('-')[-1]), t) for t in total_mkts
+                         if game_key in t and t.split('-')[-1].isdigit()]
+            if not game_mkts: continue
+
+            # Find line closest to YES=0.50
+            fair_line = min(game_mkts,
+                key=lambda x: abs(float(total_mkts[x[1]].get('yes_bid_dollars',0) or 0) - 0.50))
+            kalshi_line = fair_line[0]
+            edge_pts    = round(g['exp_total'] - kalshi_line, 1)
+
+            if edge_pts < -5:  # strong UNDER signal
+                # Add the NO on kalshi_line+ as a leg
+                ticker = fair_line[1]
+                m      = total_mkts[ticker]
+                yb     = float(m.get('yes_bid_dollars',0) or 0)
+                if yes_min <= yb <= yes_max:
+                    total_leg = {
+                        'ticker':     ticker,
+                        'player':     f"{g['away_team']}@{g['home_team']} UNDER {kalshi_line}",
+                        'yes_bid':    yb,
+                        'conf':       min(0.99, round(abs(edge_pts)/13.8*0.5+0.5, 3)),
+                        'ask_size':   float(m.get('yes_ask_size_fp',0) or 0),
+                        'oi':         float(m.get('open_interest_fp',0) or 0),
+                        'vol':        float(m.get('volume_24h_fp',0) or 0),
+                        'buy_pressure': 0.5,
+                        'smart_money':  0,
+                        'composite':  round(abs(edge_pts)/13.8*2.0, 3),
+                    }
+                    # Only add if not already in legs
+                    if ticker not in {l['ticker'] for l in legs}:
+                        legs.append(total_leg)
+                        log.info(f'Added UNDER leg: {game_key} {kalshi_line}+ edge={edge_pts:+.1f}pts conf={total_leg["conf"]:.2f}')
+    except Exception as _te:
+        log.debug(f'Game total leg supplement failed: {_te}')
+
     return legs  # full dicts with ticker/conf/composite
 
 
