@@ -57,27 +57,28 @@ def get_nba_scoreboard(dates=None):
 
 def fmt_games(events, show_live=False, show_all=False):
     lines = []
-    now   = datetime.now(timezone.utc)
+    now      = datetime.now(timezone.utc)
+    pt_now   = datetime.now(timezone.utc) - timedelta(hours=7)
+    date_str = pt_now.strftime('%a %b %-d')
     for e in events:
         status = e.get('status',{}).get('type',{}).get('name','')
-        name   = e.get('name','')
+        name   = e.get('name','').encode('ascii','ignore').decode()
         comps  = e.get('competitions',[{}])[0]
         teams  = comps.get('competitors',[])
         detail = e.get('status',{}).get('type',{}).get('shortDetail','')
         tip    = e.get('date','')
-
         if status == 'STATUS_SCHEDULED':
             if show_live: continue
-            dt  = datetime.fromisoformat(tip.replace('Z','+00:00'))
-            pt  = (dt - timedelta(hours=7)).strftime('%-I:%M %p PT')
-            mins = int((dt-now).total_seconds()/60)
-            lines.append(f"🕐 {name[:35]} — {pt} ({mins}min)")
+            dt   = datetime.fromisoformat(tip.replace('Z','+00:00'))
+            pt   = (dt - timedelta(hours=7)).strftime('%-I:%M %p PT')
+            mins = int((dt - now).total_seconds() / 60)
+            lines.append(f"🕐 {date_str} {pt} — {name[:35]} ({mins}min)")
         elif status == 'STATUS_IN_PROGRESS':
             score = ' vs '.join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
-            lines.append(f"🔴 {name[:30]} | {score} | {detail}")
+            lines.append(f"🔴 LIVE {date_str} — {name[:28]} | {score} | {detail}")
         elif status == 'STATUS_FINAL' and show_all:
             score = ' vs '.join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
-            lines.append(f"✅ {name[:30]} | FINAL {score}")
+            lines.append(f"✅ FINAL {date_str} — {name[:28]} | {score}")
     return lines
 
 
@@ -355,42 +356,44 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     events = get_nba_scoreboard()
-    lines  = ["🏀 *Tonight's NBA Games*\n"]
+    lines  = ["🏀 Tonight's NBA Games\n"]
     lines.extend(fmt_games(events, show_all=True) or ["No games today"])
-    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
-        reply_markup=main_menu_keyboard())
+    await update.message.reply_text('\n'.join(lines), reply_markup=main_menu_keyboard())
 
 async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     events = get_nba_scoreboard()
-    live   = [l for e in events
-              for l in fmt_games([e], show_live=True)
-              if e.get('status',{}).get('type',{}).get('name','') == 'STATUS_IN_PROGRESS']
-    sched  = fmt_games(events)
-    lines  = ["⚡ *Live Scores*\n"]
-    lines.extend(live or ["No live games"])
+    live  = fmt_games([e for e in events if e.get("status",{}).get("type",{}).get("name","") == "STATUS_IN_PROGRESS"], show_all=True)
+    sched = fmt_games([e for e in events if e.get("status",{}).get("type",{}).get("name","") == "STATUS_SCHEDULED"])
+    lines = ["⚡ Live Scores\n"]
+    lines.extend(live or ["No live games right now"])
     if sched:
         lines.append("\n📅 Upcoming:")
         lines.extend(sched[:4])
-    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
-        reply_markup=main_menu_keyboard())
+    await update.message.reply_text('\n'.join(lines), reply_markup=main_menu_keyboard())
 
 async def cmd_props(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from core.kalshi_client import _signed_get
+    stat_map = {"KXNBAPTS":"pts","KXNBAREB":"reb","KXNBAAST":"ast","KXNBA3PT":"3pt","KXNBASTL":"stl"}
     all_m = []
-    for s in ['KXNBAPTS','KXNBAREB','KXNBAAST']:
-        d = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
-        all_m.extend([m for m in d.get('markets',[])
-                      if float(m.get('open_interest_fp',0) or 0) > 100])
+    for s in stat_map:
+        d = _signed_get(f"/trade-api/v2/markets?series_ticker={s}&limit=200&status=open")
+        all_m.extend([m for m in d.get("markets",[]) if float(m.get("open_interest_fp",0) or 0) > 50])
         time.sleep(0.3)
-    all_m.sort(key=lambda x: float(x.get('open_interest_fp',0) or 0), reverse=True)
-    lines = ["🎯 *Top Props by OI*\n"]
-    for m in all_m[:20]:
-        sub = (m.get('no_sub_title','') or '').split(':')[0].strip()[:22]
-        yb  = float(m.get('yes_bid_dollars',0) or 0)
-        oi  = float(m.get('open_interest_fp',0) or 0)
-        lines.append(f"`{yb:.2f}` OI={oi:.0f} {sub}")
-    await update.message.reply_text('\n'.join(lines), parse_mode="Markdown",
-        reply_markup=main_menu_keyboard())
+    all_m.sort(key=lambda x: float(x.get("open_interest_fp",0) or 0), reverse=True)
+    lines = ["🎯 Top Props by OI\n"]
+    seen = set()
+    for m in all_m[:25]:
+        sub   = (m.get("no_sub_title","") or "").encode("ascii","ignore").decode()
+        name  = sub.split(":")[0].strip()[:22]
+        thresh = m["ticker"].split("-")[-1]
+        stat  = stat_map.get(m["ticker"].split("-")[0],"?")
+        yb    = float(m.get("yes_bid_dollars",0) or 0)
+        oi    = float(m.get("open_interest_fp",0) or 0)
+        key   = f"{name}{stat}{thresh}"
+        if key in seen: continue
+        seen.add(key)
+        lines.append(f"YES={yb:.2f} OI={oi:.0f} — {name} {stat} {thresh}+")
+    await update.message.reply_text("\n".join(lines), reply_markup=main_menu_keyboard())
 
 async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from core.kalshi_client import _signed_get
