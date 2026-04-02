@@ -26,20 +26,20 @@ print('SUCCESS' if result else 'FAILED')
 }
 
 # 4pm PT tip — fire at 3pm PT (22:00 UTC)
-run_game PHIWAS 1.50 3
-run_game ATLORL 1.50 3
-run_game BOSMIA 1.50 3
+run_game PHIWAS 1.50 8
+run_game ATLORL 1.50 8
+run_game BOSMIA 1.50 8
 
 # 5pm PT tips
-run_game NYKMEM 1.50 3
-run_game SACKTOR 1.50 3
-run_game INDCHI 1.50 3
-run_game MILHOU 1.50 3
+run_game NYKMEM 1.50 8
+run_game SACKTOR 1.50 8
+run_game INDCHI 1.50 8
+run_game MILHOU 1.50 8
 
 # 6pm PT tip
-run_game DENUTА 1.50 3
+run_game DENUTА 1.50 8
 
 # 7pm PT tip
-run_game SASGSW 1.50 3
+run_game SASGSW 1.50 8
 
 echo "=== DONE $(date) ===" | tee -a $LOG

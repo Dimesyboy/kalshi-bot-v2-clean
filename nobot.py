@@ -135,7 +135,7 @@ def score_leg_full(market):
     }
 
 
-def get_best_no_legs(game_filter=None, n=10, yes_min=0.70, yes_max=0.88):
+def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
     """
     Find best legs for NO combo using full signal stack.
     Prefers: high model conf + smart money YES + liquid + mid-range YES price
@@ -267,10 +267,10 @@ def fire_no_combo(game_filter=None, target='10.00', label='', n_legs=10):
     if nb_preview <= 0.01:
         log.warning(f'No valid no_bid: {nb_preview}')
         return False
-    if nb_preview < 0.08:
+    if nb_preview < 0.01:
         log.info(f'no_bid {nb_preview:.4f} too cheap — illiquid, skipping')
         return False
-    if nb_preview > 0.40:
+    if nb_preview > 0.55:
         log.info(f'no_bid {nb_preview:.4f} too expensive — {1/nb_preview:.2f}x payout, skipping')
         return False
 
@@ -388,7 +388,7 @@ if __name__ == '__main__':
     import sys
     game   = sys.argv[1] if len(sys.argv) > 1 else None
     target = sys.argv[2] if len(sys.argv) > 2 else '5.00'
-    n      = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+    n      = int(sys.argv[3]) if len(sys.argv) > 3 else 8
     label  = game or 'ALL'
 
     # Retry up to 10 times with 3 min gaps — yes_c populates closer to tip
