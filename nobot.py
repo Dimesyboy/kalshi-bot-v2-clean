@@ -223,7 +223,8 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
         for g in edges:
             # Only use strong UNDER edges (model < kalshi - 5)
             # Find Kalshi fair line for this game
-            game_key = g['away_team'] + g['home_team']
+            from data.game_totals import _espn_to_kalshi_game
+            game_key = _espn_to_kalshi_game(g['away_team'], g['home_team'])
             game_mkts = [(int(t.split('-')[-1]), t) for t in total_mkts
                          if game_key in t and t.split('-')[-1].isdigit()]
             if not game_mkts: continue
@@ -239,7 +240,8 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.50, yes_max=0.68):
                 ticker = fair_line[1]
                 m      = total_mkts[ticker]
                 yb     = float(m.get('yes_bid_dollars',0) or 0)
-                if yes_min <= yb <= yes_max:
+                # For total legs use wider range — selected on model edge not price
+                if 0.35 <= yb <= 0.75:
                     total_leg = {
                         'ticker':     ticker,
                         'player':     f"{g['away_team']}@{g['home_team']} UNDER {kalshi_line}",
