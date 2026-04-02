@@ -109,18 +109,23 @@ class Reconciler:
         """Check for new settlements via raw HTTP and record to positions_db."""
         try:
             from data.positions_db import record_settlement, get_open_positions
-            from core.portfolio import fetch_settlements
+            from core.portfolio import fetch_settlements, fetch_fills, _build_ticker_to_orderid
+
             open_tickers = {p['ticker'] for p in get_open_positions()}
             if not open_tickers:
                 return
 
+            # Build ticker -> order_id map from fills for attribution
+            fills           = fetch_fills(limit=500)
+            ticker_to_order = _build_ticker_to_orderid(fills)
+
             settlements = fetch_settlements(limit=50)
             for s in settlements:
-                ticker  = s.get('ticker','')
-                revenue = s.get('revenue', 0) / 100.0
+                ticker   = s.get('ticker','')
+                revenue  = s.get('revenue', 0) / 100.0
                 if ticker in open_tickers:
-                    order_id = ''
-                    source   = 'bot' if self.is_bot_trade(order_id, '') else 'manual'
+                    order_id = ticker_to_order.get(ticker, '')
+                    source   = 'bot' if self.is_bot_trade(order_id, order_id) else 'manual'
                     record_settlement(ticker, revenue, source=source)
                     log.info(f"[Recon] Settlement: {ticker[-30:]} "
                              f"revenue=${revenue:.2f} source={source}")
@@ -205,13 +210,36 @@ class Reconciler:
         return self._get_position_source(None, ticker)
 
     def _calc_settled_pnl(self, pa) -> tuple[float, float]:
-        """Calculate settled PNL from positions DB."""
+        """Calculate settled PNL from portfolio_settlements using is_bot attribution."""
         try:
-            from data.positions_db import get_pnl_summary
-            summary    = get_pnl_summary()
-            bot_pnl    = summary.get('bot', {}).get('pnl', 0.0)
-            manual_pnl = summary.get('manual', {}).get('pnl', 0.0)
-            return round(bot_pnl, 2), round(manual_pnl, 2)
+            import sqlite3
+            conn = sqlite3.connect('/root/kalshi-bot-v2/data/positions.db')
+            conn.row_factory = sqlite3.Row
+
+            # Bot PnL — is_bot=1 settlements
+            bot_row = conn.execute("""
+                SELECT SUM(revenue) as rev, SUM(yes_cost + no_cost) as cost,
+                       SUM(fee_cost) as fees
+                FROM portfolio_settlements
+                WHERE COALESCE(is_bot, 0) = 1
+            """).fetchone()
+            bot_pnl = round(
+                (bot_row['rev'] or 0) - (bot_row['cost'] or 0) - (bot_row['fees'] or 0), 2
+            ) if bot_row else 0.0
+
+            # Manual PnL — is_bot=0, bot-era only (Mar 30+)
+            manual_row = conn.execute("""
+                SELECT SUM(revenue) as rev, SUM(yes_cost + no_cost) as cost
+                FROM portfolio_settlements
+                WHERE COALESCE(is_bot, 0) = 0
+                AND settled_time >= '2026-03-30'
+            """).fetchone()
+            manual_pnl = round(
+                (manual_row['rev'] or 0) - (manual_row['cost'] or 0), 2
+            ) if manual_row else 0.0
+
+            conn.close()
+            return bot_pnl, manual_pnl
         except Exception as e:
             log.debug(f"[Recon] PNL calc error: {e}")
             return 0.0, 0.0
