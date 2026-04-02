@@ -322,6 +322,110 @@ def accept_no(quote_id, collection_ticker=''):
     return r.status_code in (200, 204), r.text
 
 
+def optimize_combo_payout(candidates: list, n_legs: int = 8,
+                          max_trials: int = 8) -> tuple:
+    """
+    Try multiple leg combinations via preview RFQ and return the best payout.
+    Returns (best_legs, best_no_bid, best_quote) or (None, 1.0, None).
+
+    Strategy:
+      Trial 0: greedy top-N (current approach)
+      Trial 1-3: top-4 must-haves + random from rest
+      Trial 4-6: force game total legs + best props
+      Trial 7: diversity mix (one leg per game)
+    """
+    import random
+
+    if len(candidates) < 4:
+        return None, 1.0, None
+
+    best_no_bid = 1.0
+    best_legs   = None
+    best_quote  = None
+    best_yc     = 0
+
+    # Separate game total legs from prop legs
+    total_legs = [l for l in candidates if 'UNDER' in l.get('player','') or 'OVER' in l.get('player','')]
+    prop_legs  = [l for l in candidates if l not in total_legs]
+
+    # Build trial bundles
+    top4   = prop_legs[:4]
+    rest   = prop_legs[4:20]
+    trials = []
+
+    # Trial 0: greedy top-N
+    trials.append(candidates[:n_legs])
+
+    # Trials 1-3: top-4 + random from rest
+    for _ in range(3):
+        if len(rest) >= n_legs - 4:
+            extra = random.sample(rest, min(n_legs-4, len(rest)))
+            bundle = top4 + extra
+            if total_legs:
+                bundle = bundle[:n_legs-len(total_legs)] + total_legs
+            trials.append(bundle[:n_legs])
+
+    # Trials 4-5: force total legs + best props
+    if total_legs:
+        for _ in range(2):
+            n_props = n_legs - len(total_legs)
+            bundle  = prop_legs[:n_props] + total_legs
+            trials.append(bundle[:n_legs])
+
+    # Trial 6: diversity — one leg per game
+    seen_games = set()
+    diverse = []
+    for l in candidates:
+        game = l.get('ticker','').split('-')[1][:12] if '-' in l.get('ticker','') else ''
+        if game not in seen_games:
+            diverse.append(l)
+            seen_games.add(game)
+    if len(diverse) >= 4:
+        trials.append(diverse[:n_legs])
+
+    # Deduplicate trials
+    seen_trials = set()
+    unique_trials = []
+    for t in trials:
+        key = tuple(sorted(l['ticker'] for l in t))
+        if key not in seen_trials:
+            seen_trials.add(key)
+            unique_trials.append(t)
+
+    log.info(f'[Optimizer] Testing {len(unique_trials)} combinations...')
+
+    for idx, trial_legs in enumerate(unique_trials[:max_trials]):
+        try:
+            tickers = [l['ticker'] for l in trial_legs]
+            quote, mt = submit_no_rfq(tickers, '1.00')
+            if not quote:
+                continue
+            nb = float(quote.get('no_bid_dollars', 0) or 0)
+            yc = float(quote.get('yes_contracts_fp', 0) or 0)
+            if nb <= 0:
+                continue
+            log.info(f'[Optimizer] Trial {idx}: no_bid={nb:.4f} ({1/nb:.2f}x) yes_c={yc:.0f}')
+            # Prefer: lower no_bid AND yes_c > 0 (MM quoting YES side)
+            score = nb - (0.05 if yc > 0 else 0)  # bonus for yes_c
+            best_score = best_no_bid - (0.05 if best_yc > 0 else 0)
+            if score < best_score:
+                best_no_bid = nb
+                best_legs   = trial_legs
+                best_quote  = quote
+                best_yc     = yc
+            time.sleep(2)
+        except Exception as e:
+            log.debug(f'[Optimizer] Trial {idx} failed: {e}')
+
+    if best_legs:
+        log.info(f'[Optimizer] Best: no_bid={best_no_bid:.4f} ({1/best_no_bid:.2f}x) '
+                 f'yes_c={best_yc:.0f} legs={len(best_legs)}')
+    else:
+        log.warning('[Optimizer] No valid quote found')
+
+    return best_legs, best_no_bid, best_quote
+
+
 def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
     """Full flow: scan → RFQ → quote → accept YES → hold NO."""
     import os
@@ -331,35 +435,36 @@ def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
     log.info(f'Balance: ${get_balance():.2f}')
 
     # Get best legs
-    leg_dicts = get_best_no_legs(game_filter, n=n_legs)
+    # Get large candidate pool for optimizer
+    leg_dicts = get_best_no_legs(game_filter, n=25)
     if len(leg_dicts) < n_legs:
         log.info(f'Only {len(leg_dicts)} legs from {game_filter} — supplementing')
-        all_legs = get_best_no_legs(None, n=n_legs*2)
+        all_legs = get_best_no_legs(None, n=30)
         existing = {l['ticker'] for l in leg_dicts}
         for l in all_legs:
-            if l['ticker'] not in existing and len(leg_dicts) < n_legs:
+            if l['ticker'] not in existing and len(leg_dicts) < 25:
                 leg_dicts.append(l)
                 existing.add(l['ticker'])
         if len(leg_dicts) < 4:
             log.warning(f'Still not enough legs ({len(leg_dicts)}) — aborting')
             return False
-        log.info(f'Supplemented to {len(leg_dicts)} legs')
 
+    # ── Payout optimizer — find best leg combination ─────────────────
+    best_legs, best_no_bid, best_quote = optimize_combo_payout(
+        leg_dicts, n_legs=n_legs, max_trials=8)
+
+    if not best_legs or not best_quote:
+        log.warning('No valid combo found by optimizer')
+        return False
+
+    # Use best combination found
+    leg_dicts = best_legs
     tickers   = [l['ticker'] for l in leg_dicts]
     avg_conf  = round(sum(l['conf'] for l in leg_dicts) / len(leg_dicts), 3)
     avg_score = round(sum(l['composite'] for l in leg_dicts) / len(leg_dicts), 3)
     min_conf  = round(min(l['conf'] for l in leg_dicts), 3)
-    log.info(f'Combo stats: avg_conf={avg_conf} min_conf={min_conf} avg_score={avg_score}')
+    nb_preview = best_no_bid
 
-    # Step 1: Preview quote to discover no_bid
-    log.info(f'Getting preview quote...')
-    preview, mt = submit_no_rfq(tickers, '1.00', game_filter=game_filter)
-    mt = mt or ''
-    if not preview:
-        log.warning('No preview quote received')
-        return False
-
-    nb_preview = float(preview.get('no_bid_dollars', 0) or 0)
     if nb_preview <= 0.01:
         log.warning(f'No valid no_bid: {nb_preview}')
         return False
@@ -367,21 +472,21 @@ def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
         log.info(f'no_bid {nb_preview:.4f} too cheap — illiquid, skipping')
         return False
     if nb_preview > 0.50:
-        log.info(f'no_bid {nb_preview:.4f} too expensive — {1/nb_preview:.2f}x payout, skipping')
+        log.info(f'Best combo no_bid={nb_preview:.4f} — payout only {1/nb_preview:.2f}x, aborting')
         return False
 
-    # Step 2: Size contracts from desired risk
+    # Size contracts from desired risk
     MAX_RISK    = float(target)
     contracts   = max(1, int(MAX_RISK / nb_preview))
     actual_cost = round(nb_preview * contracts, 4)
     payout_x    = round(1.0 / nb_preview, 2)
-    log.info(f'Preview: no_bid={nb_preview:.4f} payout={payout_x:.2f}x')
+    log.info(f'Best combo: no_bid={nb_preview:.4f} payout={payout_x:.2f}x')
     log.info(f'Sizing: {contracts} contracts | risk=${actual_cost:.4f} | win=${contracts:.2f}')
 
-    # Step 3: Submit real RFQ with calculated cost as target
+    # Submit final RFQ with calculated cost
     log.info(f'Submitting {len(tickers)}-leg RFQ target=${actual_cost:.4f}...')
-    quote, mt2 = submit_no_rfq(tickers, f'{actual_cost:.4f}', game_filter=game_filter)
-    mt = mt2 or mt
+    quote, mt = submit_no_rfq(tickers, f'{actual_cost:.4f}', game_filter=game_filter)
+    mt = mt or ''
     if not quote:
         log.warning('No quote received')
         return False
