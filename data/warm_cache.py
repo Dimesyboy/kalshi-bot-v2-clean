@@ -158,5 +158,15 @@ if __name__ == "__main__":
     except Exception as e:
         log.warning(f"Game totals update failed: {e}")
 
+    # MLB data
+    log.info("Fetching MLB data...")
+    try:
+        from data.mlb_stats import run_full_mlb_fetch
+        from data.mlb_totals import update_mlb_expected_totals
+        run_full_mlb_fetch()
+        update_mlb_expected_totals(days_back=7)
+    except Exception as e:
+        log.warning(f"MLB fetch failed: {e}")
+
     log.info("Done!")
     cache_stats()
