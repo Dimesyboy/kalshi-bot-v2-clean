@@ -147,11 +147,33 @@ def get_recent_edges(days: int = 3) -> list:
     conn.close()
     return [dict(r) for r in rows]
 
+def get_model_accuracy(days: int = 30) -> dict:
+    """Return model accuracy stats over last N days."""
+    conn = get_db()
+    from datetime import timedelta
+    cutoff = (date.today() - timedelta(days=days)).strftime('%Y%m%d')
+    rows = conn.execute('''
+        SELECT total_points, exp_total,
+               ABS(total_points - exp_total) as abs_err
+        FROM game_totals
+        WHERE game_date >= ? AND total_points > 0 AND exp_total > 0
+    ''', (cutoff,)).fetchall()
+    conn.close()
+    if not rows: return {}
+    errors = [r['abs_err'] for r in rows]
+    import statistics
+    return {
+        'n':      len(rows),
+        'mae':    round(statistics.mean(errors), 1),
+        'median': round(statistics.median(errors), 1),
+        'within_10': sum(1 for e in errors if e <= 10),
+        'within_20': sum(1 for e in errors if e <= 20),
+    }
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     n = update_expected_totals()
     print(f"Updated {n} games")
-    edges = get_tonight_edges()
-    print(f"\nTonight's games:")
-    for g in edges:
-        print(f"  {g['away_team']}@{g['home_team']}: exp={g['exp_total']}")
+    acc = get_model_accuracy()
+    print(f"Accuracy: MAE={acc.get('mae')} within_10={acc.get('within_10')}/{acc.get('n')}")
