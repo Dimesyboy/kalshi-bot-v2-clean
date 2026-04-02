@@ -150,5 +150,13 @@ if __name__ == "__main__":
     fetch_schedule_context(days_ahead=4)
 
 
+    # Game totals — expected scores for tonight
+    log.info("Calculating expected game totals...")
+    try:
+        from data.game_totals import update_expected_totals
+        update_expected_totals()
+    except Exception as e:
+        log.warning(f"Game totals update failed: {e}")
+
     log.info("Done!")
     cache_stats()

@@ -182,7 +182,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ No qualifying combo found.\nTry closer to tip time.",
                     reply_markup=back_keyboard())
         except Exception as e:
-            await query.edit_message_text(f"❌ {str(e)[:200]}", reply_markup=back_keyboard())
+            await query.edit_message_text(f"Error: {str(e)[:200]}", reply_markup=back_keyboard())
 
     # ── Tonight's Games ───────────────────────────────────────────────────
     elif data == "tonight":
@@ -222,23 +222,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "props":
         try:
             from core.kalshi_client import _signed_get
+            from collections import defaultdict
+            stat_map = {"KXNBAPTS":"pts","KXNBAREB":"reb","KXNBAAST":"ast","KXNBA3PT":"3pt","KXNBASTL":"stl"}
             all_m = []
-            for s in ['KXNBAPTS','KXNBAREB','KXNBAAST']:
-                data2 = _signed_get(f'/trade-api/v2/markets?series_ticker={s}&limit=200&status=open')
-                all_m.extend([m for m in data2.get('markets',[])
-                               if float(m.get('open_interest_fp',0) or 0) > 50])
+            for s in stat_map:
+                d = _signed_get(f"/trade-api/v2/markets?series_ticker={s}&limit=200&status=open")
+                all_m.extend([m for m in d.get("markets",[]) if float(m.get("open_interest_fp",0) or 0) > 30])
                 time.sleep(0.3)
-            all_m.sort(key=lambda x: float(x.get('open_interest_fp',0) or 0), reverse=True)
-            lines = ["🎯 *Top Props by OI*\n"]
-            for m in all_m[:15]:
-                sub   = (m.get('no_sub_title','') or '').split(':')[0].strip()[:20]
-                yb    = float(m.get('yes_bid_dollars',0) or 0)
-                oi    = float(m.get('open_interest_fp',0) or 0)
-                lines.append(f"YES={yb:.2f} OI={oi:.0f} — {sub}")
-            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+            by_player = defaultdict(lambda: defaultdict(list))
+            for m in all_m:
+                sub    = (m.get("no_sub_title","") or "").encode("ascii","ignore").decode()
+                name   = sub.split(":")[0].strip()
+                stat   = stat_map.get(m["ticker"].split("-")[0],"?")
+                thresh = m["ticker"].split("-")[-1]
+                yb     = float(m.get("yes_bid_dollars",0) or 0)
+                oi     = float(m.get("open_interest_fp",0) or 0)
+                by_player[name][stat].append((thresh, yb, oi))
+            player_oi   = {p: sum(t[2] for s in stats.values() for t in s) for p,stats in by_player.items()}
+            top_players = sorted(player_oi, key=player_oi.get, reverse=True)[:10]
+            out = ["Top Props by Player"]
+            for player in top_players:
+                out.append("")
+                out.append(player + ":")
+                for stat in ["pts","reb","ast","3pt","stl"]:
+                    thresholds = by_player[player].get(stat,[])
+                    if not thresholds: continue
+                    thresholds.sort(key=lambda x: int(x[0]) if x[0].isdigit() else 0)
+                    out.append("  " + stat + ":")
+                    for thresh, yb, oi in thresholds:
+                        out.append("    " + thresh + "+  YES=" + f"{yb:.2f}" + "  OI=" + f"{oi:.0f}")
+            await query.edit_message_text("\n".join(out),
                 reply_markup=refresh_back_keyboard("props"))
         except Exception as e:
-            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+            await query.edit_message_text("Error: " + str(e)[:200], reply_markup=back_keyboard())
 
     # ── Orderbook Monitor Stats ───────────────────────────────────────────
     elif data == "obdata":
@@ -552,6 +568,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
+async def cmd_totals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tonight game total model vs Kalshi edges."""
+    from data.game_totals import get_tonight_edges
+    from core.kalshi_client import _signed_get
+    import time
+
+    # Get Kalshi fair lines
+    data = _signed_get('/trade-api/v2/markets?series_ticker=KXNBATOTAL&limit=200&status=open')
+    from collections import defaultdict
+    kalshi_lines = {}
+    by_game = defaultdict(list)
+    for m in data.get('markets',[]):
+        game = m['ticker'].split('-')[1][5:]
+        yb   = float(m.get('yes_bid_dollars',0) or 0)
+        thresh = int(m['ticker'].split('-')[-1])
+        by_game[game].append((thresh, yb))
+    for game, lines2 in by_game.items():
+        fair = min(lines2, key=lambda x: abs(x[1]-0.50))
+        kalshi_lines[game] = fair[0]
+
+    edges = get_tonight_edges()
+    lines_out = ["Tonight Game Totals\n"]
+    for g in edges:
+        key  = g['away_team']+g['home_team']
+        line = kalshi_lines.get(key)
+        if not line: continue
+        edge = round(g['exp_total'] - line, 1)
+        dir  = 'UNDER' if edge < -5 else 'OVER' if edge > 5 else 'FAIR'
+        conf = min(99, round(abs(edge)/13.8*50+50))
+        icon = 'UNDER' if dir=='UNDER' else 'OVER' if dir=='OVER' else 'FAIR'
+        bet  = f"NO on {line}+" if dir=='UNDER' else f"YES on {line-3}+" if dir=='OVER' else 'skip'
+        lines_out.append(f"{g['away_team']}@{g['home_team']}: model={g['exp_total']:.0f} line={line} {icon} {edge:+.1f} ({conf}%)")
+        if dir != 'FAIR':
+            lines_out.append(f"  Bet: {bet}")
+    await update.message.reply_text("\n".join(lines_out), reply_markup=main_menu_keyboard())
+
+
 def main():
     if not config.TELEGRAM_BOT_TOKEN:
         log.error("No TELEGRAM_BOT_TOKEN")
@@ -574,6 +627,7 @@ def main():
     app.add_handler(CommandHandler("obdata",    cmd_obdata))
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("rfq",       cmd_rfq))
+    app.add_handler(CommandHandler("totals",   cmd_totals))
 
     # Callbacks + text
     app.add_handler(CallbackQueryHandler(handle_callback))
