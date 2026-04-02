@@ -323,16 +323,17 @@ def accept_no(quote_id, collection_ticker=''):
 
 
 def optimize_combo_payout(candidates: list, n_legs: int = 8,
-                          max_trials: int = 8) -> tuple:
+                          max_trials: int = 14) -> tuple:
     """
-    Try multiple leg combinations via preview RFQ and return the best payout.
-    Returns (best_legs, best_no_bid, best_quote) or (None, 1.0, None).
+    Search across both leg combinations AND leg counts to find best no_bid.
+    Goal: lowest no_bid (highest payout) regardless of how many legs it takes.
 
-    Strategy:
-      Trial 0: greedy top-N (current approach)
-      Trial 1-3: top-4 must-haves + random from rest
-      Trial 4-6: force game total legs + best props
-      Trial 7: diversity mix (one leg per game)
+    Search space:
+      leg counts: 4-12
+      per count: 2 trials (greedy + random diverse)
+      total: up to 14 RFQ calls (~30 seconds)
+
+    Returns (best_legs, best_no_bid, best_quote) or (None, 1.0, None).
     """
     import random
 
@@ -343,58 +344,59 @@ def optimize_combo_payout(candidates: list, n_legs: int = 8,
     best_legs   = None
     best_quote  = None
     best_yc     = 0
+    best_n      = 0
 
-    # Separate game total legs from prop legs
+    # Separate total legs from prop legs
     total_legs = [l for l in candidates if 'UNDER' in l.get('player','') or 'OVER' in l.get('player','')]
     prop_legs  = [l for l in candidates if l not in total_legs]
 
-    # Build trial bundles
-    top4   = prop_legs[:4]
-    rest   = prop_legs[4:20]
-    trials = []
-
-    # Trial 0: greedy top-N
-    trials.append(candidates[:n_legs])
-
-    # Trials 1-3: top-4 + random from rest
-    for _ in range(3):
-        if len(rest) >= n_legs - 4:
-            extra = random.sample(rest, min(n_legs-4, len(rest)))
-            bundle = top4 + extra
-            if total_legs:
-                bundle = bundle[:n_legs-len(total_legs)] + total_legs
-            trials.append(bundle[:n_legs])
-
-    # Trials 4-5: force total legs + best props
-    if total_legs:
-        for _ in range(2):
-            n_props = n_legs - len(total_legs)
-            bundle  = prop_legs[:n_props] + total_legs
-            trials.append(bundle[:n_legs])
-
-    # Trial 6: diversity — one leg per game
+    # Build diversity pool — one leg per game
     seen_games = set()
-    diverse = []
+    diverse_pool = []
     for l in candidates:
         game = l.get('ticker','').split('-')[1][:12] if '-' in l.get('ticker','') else ''
         if game not in seen_games:
-            diverse.append(l)
+            diverse_pool.append(l)
             seen_games.add(game)
-    if len(diverse) >= 4:
-        trials.append(diverse[:n_legs])
 
-    # Deduplicate trials
+    # Generate trials across leg counts
+    trials = []  # list of (n, bundle)
+
+    for n in range(4, min(13, len(candidates)+1)):
+        # Trial A: greedy top-N (includes totals naturally)
+        bundle_a = candidates[:n]
+        trials.append((n, bundle_a))
+
+        # Trial B: diverse — spread across games, force total legs
+        if len(diverse_pool) >= 4:
+            base = diverse_pool[:max(4, n - len(total_legs))]
+            bundle_b = base[:n]
+            if total_legs and len(bundle_b) < n:
+                bundle_b = bundle_b + total_legs
+            bundle_b = bundle_b[:n]
+            if len(bundle_b) >= 4:
+                trials.append((n, bundle_b))
+
+        # Trial C: random mix from top-20 + force totals (only some sizes)
+        if n in [6, 8, 10] and len(prop_legs) >= n:
+            random_props = random.sample(prop_legs[:20], min(n - len(total_legs), len(prop_legs[:20])))
+            bundle_c = random_props + total_legs
+            bundle_c = bundle_c[:n]
+            if len(bundle_c) >= 4:
+                trials.append((n, bundle_c))
+
+    # Deduplicate
     seen_trials = set()
     unique_trials = []
-    for t in trials:
-        key = tuple(sorted(l['ticker'] for l in t))
-        if key not in seen_trials:
+    for n, bundle in trials:
+        key = tuple(sorted(l['ticker'] for l in bundle))
+        if key not in seen_trials and len(bundle) >= 4:
             seen_trials.add(key)
-            unique_trials.append(t)
+            unique_trials.append((n, bundle))
 
-    log.info(f'[Optimizer] Testing {len(unique_trials)} combinations...')
+    log.info(f'[Optimizer] Testing {len(unique_trials)} combos across {4}-{min(12,len(candidates))} legs...')
 
-    for idx, trial_legs in enumerate(unique_trials[:max_trials]):
+    for idx, (n, trial_legs) in enumerate(unique_trials[:max_trials]):
         try:
             tickers = [l['ticker'] for l in trial_legs]
             quote, mt = submit_no_rfq(tickers, '1.00')
@@ -404,24 +406,25 @@ def optimize_combo_payout(candidates: list, n_legs: int = 8,
             yc = float(quote.get('yes_contracts_fp', 0) or 0)
             if nb <= 0:
                 continue
-            log.info(f'[Optimizer] Trial {idx}: no_bid={nb:.4f} ({1/nb:.2f}x) yes_c={yc:.0f}')
-            # Prefer: lower no_bid AND yes_c > 0 (MM quoting YES side)
-            score = nb - (0.05 if yc > 0 else 0)  # bonus for yes_c
+            log.info(f'[Optimizer] Trial {idx} n={n}: no_bid={nb:.4f} ({1/nb:.2f}x) yes_c={yc:.0f}')
+            # Score: prefer lower no_bid, bonus for yes_c > 0
+            score      = nb - (0.05 if yc > 0 else 0)
             best_score = best_no_bid - (0.05 if best_yc > 0 else 0)
             if score < best_score:
                 best_no_bid = nb
                 best_legs   = trial_legs
                 best_quote  = quote
                 best_yc     = yc
+                best_n      = n
             time.sleep(2)
         except Exception as e:
-            log.debug(f'[Optimizer] Trial {idx} failed: {e}')
+            log.debug(f'[Optimizer] Trial {idx} n={n} failed: {e}')
 
     if best_legs:
-        log.info(f'[Optimizer] Best: no_bid={best_no_bid:.4f} ({1/best_no_bid:.2f}x) '
-                 f'yes_c={best_yc:.0f} legs={len(best_legs)}')
+        log.info(f'[Optimizer] Best: {best_n} legs no_bid={best_no_bid:.4f} '
+                 f'({1/best_no_bid:.2f}x) yes_c={best_yc:.0f}')
     else:
-        log.warning('[Optimizer] No valid quote found')
+        log.warning('[Optimizer] No valid quote found across all leg counts')
 
     return best_legs, best_no_bid, best_quote
 
@@ -451,7 +454,7 @@ def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
 
     # ── Payout optimizer — find best leg combination ─────────────────
     best_legs, best_no_bid, best_quote = optimize_combo_payout(
-        leg_dicts, n_legs=n_legs, max_trials=8)
+        leg_dicts, max_trials=14)
 
     if not best_legs or not best_quote:
         log.warning('No valid combo found by optimizer')
