@@ -48,8 +48,10 @@ def refresh_back_keyboard(refresh_data):
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def get_nba_scoreboard(dates=None):
-    from datetime import date
-    d = dates or date.today().strftime('%Y%m%d')
+    from datetime import datetime, timezone, timedelta
+    # Use PT date (UTC-7) not UTC
+    pt_now = datetime.now(timezone.utc) - timedelta(hours=7)
+    d = dates or pt_now.strftime('%Y%m%d')
     r = req.get('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
         params={'dates': d}, headers={'User-Agent':'Mozilla/5.0'}, timeout=6)
     return r.json().get('events', [])
@@ -69,10 +71,11 @@ def fmt_games(events, show_live=False, show_all=False):
         tip    = e.get('date','')
         if status == 'STATUS_SCHEDULED':
             if show_live: continue
-            dt   = datetime.fromisoformat(tip.replace('Z','+00:00'))
-            pt   = (dt - timedelta(hours=7)).strftime('%-I:%M %p PT')
-            mins = int((dt - now).total_seconds() / 60)
-            lines.append(f"🕐 {date_str} {pt} — {name[:35]} ({mins}min)")
+            dt      = datetime.fromisoformat(tip.replace('Z','+00:00'))
+            pt      = (dt - timedelta(hours=7)).strftime('%-I:%M %p PT')
+            mins    = int((dt - now).total_seconds() / 60)
+            game_dt = (dt - timedelta(hours=7)).strftime('%a %b %-d')
+            lines.append(f"🕐 {game_dt} {pt} — {name[:35]} ({mins}min)")
         elif status == 'STATUS_IN_PROGRESS':
             score = ' vs '.join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
             lines.append(f"🔴 LIVE {date_str} — {name[:28]} | {score} | {detail}")
@@ -313,7 +316,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if line:
                     edge = round(exp - line, 1)
                     dir  = "UNDER" if edge < -5 else "OVER" if edge > 5 else "FAIR"
-                    conf = min(99, round(abs(edge)/13.8*50+50))
+                    from data.game_totals import edge_to_confidence; conf = edge_to_confidence(edge)
                     result = f"actual={actual}" if actual and actual > 0 else "pending"
                     bet = f"NO {line}+" if dir=="UNDER" else f"YES {line-3}+" if dir=="OVER" else ""
                     ls = f"{g['away_team']}@{g['home_team']}: exp={exp:.0f} line={line} {dir}{edge:+.0f} ({conf}%) {result}"
@@ -647,7 +650,7 @@ async def cmd_totals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if line:
             edge = round(exp - line, 1)
             dir  = "UNDER" if edge < -5 else "OVER" if edge > 5 else "FAIR"
-            conf = min(99, round(abs(edge)/13.8*50+50))
+            from data.game_totals import edge_to_confidence; conf = edge_to_confidence(edge)
             result = f"actual={actual}" if actual and actual > 0 else "pending"
             bet = f"NO {line}+" if dir=="UNDER" else f"YES {line-3}+" if dir=="OVER" else ""
             line_str = f"{g['away_team']}@{g['home_team']}: exp={exp:.0f} line={line} {dir}{edge:+.0f} ({conf}%) {result}"
