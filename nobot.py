@@ -306,20 +306,27 @@ def submit_no_rfq(tickers, target='10.00', game_filter=None):
             timeout=8).json()
         quotes = [q for q in qs.get('quotes', []) if q.get('status') == 'open']
         if quotes:
-            return quotes[0], mt
+            best = min(quotes, key=lambda q: float(q.get('no_bid_dollars', 1) or 1))
+            log.info(f'[RFQ] {len(quotes)} quotes — best no_bid={best.get("no_bid_dollars")} ({1/float(best.get("no_bid_dollars",1) or 1):.2f}x)')
+            return best, mt
     return None, mt
 
 
-def accept_no(quote_id, collection_ticker=''):
+def accept_no(quote_id, collection_ticker='', quote=None):
     """
-    Accept YES on EXTENDED collection → gives NO position (fill side=no).
-    EXTENDED is the only collection that supports true NO positions via RFQ.
+    Accept YES on EXTENDED to get NO position.
+    Verified Apr 1+3: accept YES + yes_c>0 -> fill side=no -> NO position.
+    Accept NO gives YES position — never do that.
     """
     ap = f'/trade-api/v2/communications/quotes/{quote_id}/accept'
-    log.info(f'Accepting YES on EXTENDED to get NO position')
-    r  = requests.put(f'{BASE}{ap}', headers=pss('PUT', ap),
-                      json={'accepted_side': 'yes'}, timeout=8)
-    return r.status_code in (200, 204), r.text
+    yc = float((quote or {}).get('yes_contracts_fp', 0) or 0)
+    if yc <= 0:
+        return False, f'yes_c=0 — cannot get NO position, skipping'
+    log.info(f'Accepting YES on EXTENDED to get NO position (yes_c={yc:.0f})')
+    r = requests.put(f'{BASE}{ap}', headers=pss('PUT', ap),
+                     json={'accepted_side': 'yes'}, timeout=8)
+    log.info(f'Accept response: {r.status_code} {r.text[:100]}')
+    return r.status_code in (200, 201, 204), r.text
 
 
 def optimize_combo_payout(candidates: list, n_legs: int = 8,
@@ -407,9 +414,13 @@ def optimize_combo_payout(candidates: list, n_legs: int = 8,
             if nb <= 0:
                 continue
             log.info(f'[Optimizer] Trial {idx} n={n}: no_bid={nb:.4f} ({1/nb:.2f}x) yes_c={yc:.0f}')
-            # Score: prefer lower no_bid, bonus for yes_c > 0
-            score      = nb - (0.05 if yc > 0 else 0)
-            best_score = best_no_bid - (0.05 if best_yc > 0 else 0)
+            # Score: prefer lower no_bid, REQUIRE yes_c > 0 for valid NO position
+            # yes_c=0 quotes give YES position when accepted — not what we want
+            if yc == 0:
+                log.debug(f'[Optimizer] Trial {idx} n={n}: yes_c=0 — skipping (would give YES position)')
+                continue
+            score      = nb
+            best_score = best_no_bid
             if score < best_score:
                 best_no_bid = nb
                 best_legs   = trial_legs
@@ -503,7 +514,7 @@ def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
 
     # Buy NO side: pay no_bid per contract, win (1-no_bid) per contract if any leg fails
     # Payout = 1/no_bid (e.g. no_bid=0.48 → 2.08x)
-    if nc > 0 and nb > 0.01:
+    if yc > 0 and nb > 0.01:  # must have yes_c > 0 for NO position on EXTENDED
         no_cost = round(nb * nc, 4)
         no_win  = round((1.0 - nb) * nc, 4)
         payout  = round(1.0 / nb, 2)
@@ -522,7 +533,7 @@ def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
             log.info(f'REJECTED: cost ${no_cost:.4f} > ${MAX_COST:.2f} max')
             return False
 
-        ok, msg = accept_no(quote.get('id',''), collection_ticker=mt)
+        ok, msg = accept_no(quote.get('id',''), collection_ticker=mt, quote=quote)
         if ok:
             log.info(f'PLACED — NO hold cost=${no_cost:.4f} win=${no_win:.4f} ({payout:.2f}x)')
 
