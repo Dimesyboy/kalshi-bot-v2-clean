@@ -1,5 +1,5 @@
 #!/bin/bash
-# Nobot slate runner — fires 10 NO combos per game @ $1 each
+# Nobot slate runner — fires NO combos per game @ $1 each
 # Cron: */30 * * * * /root/kalshi-bot-v2/run_nobot_slate.sh
 
 cd /root/kalshi-bot-v2
@@ -11,25 +11,26 @@ mkdir -p /root/kalshi-bot-v2/logs
 touch $FIRED_LOG
 
 TARGET=${NOBOT_TARGET:-1.00}
-LEGS=${NOBOT_LEGS:-8}
-COMBOS_PER_GAME=10
+LEGS=${NOBOT_LEGS:-5}
+COMBOS_PER_GAME=${COMBOS_PER_GAME:-2}
 
-# Get games tipping in 25-40 mins
+# Get games tipping in 25-65 mins (PT date aware)
 GAMES=$(python3 -c "
 import requests
 from datetime import datetime, timezone, timedelta
 headers = {'User-Agent': 'Mozilla/5.0'}
+pt_date = (datetime.now(timezone.utc) - timedelta(hours=7)).strftime('%Y%m%d')
 r = requests.get('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
-    headers=headers, timeout=6)
+    params={'dates': pt_date}, headers=headers, timeout=6)
 now = datetime.now(timezone.utc)
 for e in r.json().get('events',[]):
     status = e.get('status',{}).get('type',{}).get('name','')
     if status != 'STATUS_SCHEDULED': continue
     tip = datetime.fromisoformat(e.get('date','').replace('Z','+00:00'))
     mins = (tip - now).total_seconds() / 60
-    if 25 <= mins <= 40:
+    if 25 <= mins <= 65:
         teams = e.get('competitions',[{}])[0].get('competitors',[])
-        abbrs = ''.join(t['team']['abbreviation'] for t in teams)
+        abbrs = ''.join(sorted(t['team']['abbreviation'] for t in teams))
         print(abbrs)
 " 2>/dev/null)
 
@@ -50,14 +51,14 @@ for GAME in $GAMES; do
 
         python3 -c "
 import random
-random.seed()  # different seed each run for optimizer diversity
+random.seed()
 from nobot import fire_no_combo
 result = fire_no_combo(game_filter=None, target='$TARGET', label='${GAME}_${i}', n_legs=$LEGS)
 print('SUCCESS' if result else 'FAILED')
-" 2>&1 | grep -E "PLACED|REJECTED|Optimizer|Best combo|no_bid|SUCCESS|FAILED|Added UNDER" | tee -a $LOG
+" 2>&1 | grep -E "PLACED|REJECTED|Best combo|true_cost|payout|SUCCESS|FAILED|yes_bid" | tee -a $LOG
 
         echo "$FIRE_KEY" >> $FIRED_LOG
-        sleep 5  # small gap between combos
+        sleep 5
     done
 
     echo "" >> $LOG
