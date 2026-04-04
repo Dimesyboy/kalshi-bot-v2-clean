@@ -85,7 +85,7 @@ def calc_expected_total(home_abbr, away_abbr, conn,
                 JOIN player_totals pt ON UPPER(i.player_name) = UPPER(pt.player_name)
                 WHERE pt.team = ? AND i.status = 'Out'
                 AND pt.games > 0
-                AND (pt.minutes_pg / pt.games) >= 20
+                AND (pt.total_minutes / pt.games) >= 20
             ''', (abbr,)).fetchone()
             n_out = out_count['n'] if out_count else 0
             adj   = -2.5 * n_out  # -2.5 pts per rotation player out

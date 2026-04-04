@@ -126,7 +126,7 @@ def init_advanced_tables():
         position        TEXT,
         age             INTEGER,
         games           INTEGER,
-        minutes_pg      REAL,
+        total_minutes   REAL,
         fg_pct          REAL,
         three_pct       REAL,
         ft_pct          REAL,
@@ -868,7 +868,7 @@ def fetch_nbaapi_stats() -> int:
             conn.execute("""
                 INSERT OR REPLACE INTO player_totals
                 (player_id, player_name, team, position, age, games,
-                 minutes_pg, fg_pct, three_pct, ft_pct,
+                 total_minutes, fg_pct, three_pct, ft_pct,
                  off_reb, def_reb, reb, ast, stl, blk, tov, pts,
                  per, ts_pct, usg_pct_true, vorp, win_shares,
                  season, updated_at)

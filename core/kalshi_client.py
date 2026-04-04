@@ -54,7 +54,7 @@ def _signed_get(path: str, params: dict = None) -> dict:
 
     ts_ms   = str(int(time.time() * 1000))
     msg     = (ts_ms + "GET" + path).encode()
-    sig     = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    sig     = private_key.sign(msg, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), hashes.SHA256())
     sig_b64 = base64.b64encode(sig).decode()
 
     headers = {
