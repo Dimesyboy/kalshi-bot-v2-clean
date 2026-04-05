@@ -64,7 +64,7 @@ def _signed_get(path: str, params: dict = None) -> dict:
     }
     r = requests.get(
         f"https://api.elections.kalshi.com{path}",
-        headers=headers, timeout=8
+        headers=headers, params=params, timeout=8
     )
     r.raise_for_status()
     return r.json()
