@@ -279,8 +279,9 @@ def snapshot_markets():
                  yes_bid_size, yes_ask_size,
                  last_price, previous_yes_bid, previous_yes_ask,
                  volume_fp, volume_24h_fp, open_interest_fp, liquidity_dollars,
-                 status, minutes_to_tip)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 status, minutes_to_tip,
+                 player_uuid, team_uuid, floor_strike)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 snap_time, ticker, parsed['game'], player_name, parsed['stat'], parsed['threshold'],
                 float(m.get('yes_bid_dollars', 0) or 0),
@@ -298,6 +299,9 @@ def snapshot_markets():
                 float(m.get('liquidity_dollars', 0) or 0),
                 m.get('status', ''),
                 mins_to_tip,
+                (m.get('custom_strike') or {}).get('basketball_player', ''),
+                (m.get('custom_strike') or {}).get('basketball_team', ''),
+                float(m.get('floor_strike', 0) or 0),
             ))
 
             # Store orderbook depth
