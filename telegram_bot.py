@@ -177,7 +177,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏳ Scanning and firing NO combo...")
         try:
             from nobot import fire_no_combo
-            result = fire_no_combo(game_filter=None, target='1.50', label='TG', n_legs=8)
+            result = fire_no_combo(game_filter=None, target='1.00', label='TG', n_legs=5)
             if result:
                 await query.edit_message_text("✅ *NO combo placed!*\nCheck positions for details.",
                     parse_mode="Markdown", reply_markup=refresh_back_keyboard("positions"))
@@ -525,7 +525,7 @@ async def cmd_fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     label = game or 'SLATE'
     await update.message.reply_text(f"🔴 Firing NO combo ({label})...")
     from nobot import fire_no_combo
-    result = fire_no_combo(game_filter=game, target='1.50', label=label, n_legs=8)
+    result = fire_no_combo(game_filter=game, target='1.00', label=label, n_legs=5)
     if result:
         await update.message.reply_text("✅ NO combo placed! Use /positions to check.",
             reply_markup=main_menu_keyboard())
