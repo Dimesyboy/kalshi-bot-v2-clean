@@ -166,12 +166,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Fire Combo ────────────────────────────────────────────────────────
     elif data == "fire_combo":
-        await query.edit_message_text("🔴 *Fire NO Combo*\n\nPick a game or fire on full slate:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌐 Full Slate", callback_data="fire_slate")],
-                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-            ]))
+        try:
+            events = get_nba_scoreboard()
+            sched  = [e for e in events if e.get("status",{}).get("type",{}).get("name","") == "STATUS_SCHEDULED"]
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(timezone.utc)
+            buttons = [[InlineKeyboardButton("🌐 Full Slate", callback_data="fire_slate")]]
+            for e in sched[:6]:
+                tip  = e.get("date","")
+                dt   = datetime.fromisoformat(tip.replace("Z","+00:00"))
+                mins = int((dt - now).total_seconds() / 60)
+                name = e.get("name","").encode("ascii","ignore").decode()[:25]
+                pt   = (dt - timedelta(hours=7)).strftime("%-I:%M%p")
+                comps = e.get("competitions",[{}])[0]
+                teams = comps.get("competitors",[])
+                abbrs = "".join(sorted(t["team"]["abbreviation"] for t in teams))
+                buttons.append([InlineKeyboardButton(
+                    f"🏀 {name} ({pt})",
+                    callback_data=f"fire_game_{abbrs}")])
+            buttons.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
+            await query.edit_message_text("🔴 *Fire NO Combo*\n\nPick a game or fire full slate:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(buttons))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    elif data.startswith("fire_game_"):
+        game = data.replace("fire_game_", "")
+        await query.edit_message_text(f"⏳ Firing NO combo for {game}...")
+        try:
+            from nobot import fire_no_combo
+            result = fire_no_combo(game_filter=None, target='1.00', label=game, n_legs=5)
+            if result:
+                await query.edit_message_text(f"✅ *NO combo placed for {game}!*",
+                    parse_mode="Markdown", reply_markup=refresh_back_keyboard("positions"))
+            else:
+                await query.edit_message_text(f"❌ No qualifying combo for {game}.\nTry closer to tip time.",
+                    reply_markup=back_keyboard())
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 
     elif data == "fire_slate":
         await query.edit_message_text("⏳ Scanning and firing NO combo...")
@@ -205,18 +238,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Live Scores ───────────────────────────────────────────────────────
     elif data == "live":
         try:
-            events = get_nba_scoreboard()
-            live   = fmt_games(events, show_live=True)
-            sched  = fmt_games(events)
-            lines  = ["⚡ *Live Scores*\n"]
-            if live:
-                lines.extend(live)
+            from datetime import datetime, timezone, timedelta
+            events   = get_nba_scoreboard()
+            now      = datetime.now(timezone.utc)
+            live_ev  = [e for e in events if e.get("status",{}).get("type",{}).get("name","") == "STATUS_IN_PROGRESS"]
+            sched_ev = [e for e in events if e.get("status",{}).get("type",{}).get("name","") == "STATUS_SCHEDULED"]
+            final_ev = [e for e in events if e.get("status",{}).get("type",{}).get("name","") == "STATUS_FINAL"]
+            lines = ["⚡ *Live Scores*"]
+            if live_ev:
+                for e in live_ev:
+                    comps  = e.get("competitions",[{}])[0]
+                    teams  = comps.get("competitors",[])
+                    detail = e.get("status",{}).get("type",{}).get("shortDetail","")
+                    scores = " — ".join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
+                    name   = e.get("name","").encode("ascii","ignore").decode()[:30]
+                    lines.append(f"\n🔴 *{name}*\n{scores}\n_{detail}_")
             else:
-                lines.append("No live games right now")
-            if sched:
-                lines.append("\n📅 *Upcoming:*")
-                lines.extend(sched[:4])
-            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
+                lines.append("\nNo live games right now")
+            if final_ev:
+                lines.append("\n✅ *Final:*")
+                for e in final_ev:
+                    comps  = e.get("competitions",[{}])[0]
+                    teams  = comps.get("competitors",[])
+                    scores = " — ".join([f"{t['team']['abbreviation']} {t.get('score','?')}" for t in teams])
+                    lines.append(f"  {scores}")
+            if sched_ev:
+                lines.append("\n🕐 *Upcoming:*")
+                for e in sched_ev[:4]:
+                    tip  = e.get("date","")
+                    name = e.get("name","").encode("ascii","ignore").decode()[:28]
+                    dt   = datetime.fromisoformat(tip.replace("Z","+00:00"))
+                    pt   = (dt - timedelta(hours=7)).strftime("%-I:%M%p")
+                    mins = int((dt - now).total_seconds() / 60)
+                    lines.append(f"  {pt} — {name} ({mins}min)")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
                 reply_markup=refresh_back_keyboard("live"))
         except Exception as e:
             await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
