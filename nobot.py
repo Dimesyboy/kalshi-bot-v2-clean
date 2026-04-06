@@ -234,53 +234,7 @@ def get_best_no_legs(game_filter=None, n=10, yes_min=0.65, yes_max=0.95):
     for l in legs:
         log.info(f'  {l["player"]:25} YES={l["yes_bid"]:.2f} conf={l["conf"]:.2f} '
                  f'smart={l["smart_money"]:.0f} buyp={l["buy_pressure"]:.2f} score={l["composite"]:.3f}')
-    # ── Supplement with highest yes_bid OVER total per game ─────────────
-    try:
-        _pre_abbrs = _pre_abbrs if '_pre_abbrs' in dir() else set()
-        from core.kalshi_client import _signed_get as _sg
-        from collections import defaultdict as _dd
-        total_data = _sg('/trade-api/v2/markets?series_ticker=KXNBATOTAL&limit=200&status=open')
-        by_game = _dd(list)
-        for m in total_data.get('markets',[]):
-            yb = float(m.get('yes_bid_dollars',0) or 0)
-            if yb < yes_min: continue
-            game = m['ticker'].split('-')[1] if '-' in m['ticker'] else ''
-            if game_filter and game_filter not in game: continue
-            # Only pre-game markets
-            if _pre_abbrs and not any(a in m.get('ticker','').upper() for a in _pre_abbrs):
-                continue
-            try:
-                thresh = int(m['ticker'].split('-')[-1])
-                by_game[game].append((yb, thresh, m))
-            except: pass
-
-        existing_tickers = {l['ticker'] for l in legs}
-        for game, lines in by_game.items():
-            # Pick highest yes_bid total line per game
-            lines.sort(reverse=True)
-            yb, thresh, m = lines[0]
-            ticker = m['ticker']
-            if ticker in existing_tickers: continue
-            sub = (m.get('no_sub_title','') or '').encode('ascii','ignore').decode()
-            total_leg = {
-                'ticker':       ticker,
-                'player':       f'{game} OVER {thresh}',
-                'yes_bid':      yb,
-                'conf':         yb,  # use yes_bid as proxy for confidence
-                'ask_size':     float(m.get('yes_ask_size_fp',0) or 0),
-                'oi':           float(m.get('open_interest_fp',0) or 0),
-                'vol':          float(m.get('volume_24h_fp',0) or 0),
-                'buy_pressure': 0.5,
-                'smart_money':  0,
-                'composite':    yb,
-            }
-            legs.append(total_leg)
-            existing_tickers.add(ticker)
-            log.info(f'Added OVER total: {sub} yes_bid={yb:.2f}')
-    except Exception as _te:
-        log.debug(f'Game total supplement failed: {_te}')
-
-    return legs  # full dicts with ticker/conf/composite
+        return legs  # full dicts with ticker/conf/composite
 
 
 def get_collection_ticker(tickers, game_filter=None):
@@ -435,7 +389,7 @@ def optimize_combo_payout(candidates: list, n_legs: int = 8,
         l.get('ticker','').split('-')[1][:12]
         for l in candidates if '-' in l.get('ticker','')
     ))
-    max_per_game = max(3, (8 // max(n_games, 1)) + 1)
+    max_per_game = 2  # 2 per game: doubles pool size with minimal payout impact
 
     def diversify(bundle):
         seen_g = {}
@@ -483,6 +437,16 @@ def optimize_combo_payout(candidates: list, n_legs: int = 8,
                 best_quote  = quote
                 best_yc     = yc
                 best_n      = n
+            # Accept immediately — quotes expire in 1-2 seconds
+            if true_cost < 0.67 and yc > 0:
+                log.info(f'[Optimizer] Accepting immediately ({true_payout:.2f}x) — quotes expire fast')
+                _ok, _msg = accept_no(quote.get('id',''), quote=quote)
+                log.info(f'[Optimizer] Accept: {_ok} {_msg[:60]}')
+                if _ok:
+                    log.info(f'[Optimizer] PLACED {true_payout:.2f}x — returning')
+                    return trial_legs, true_cost, quote, True
+                else:
+                    log.warning(f'[Optimizer] Accept failed: {_msg[:60]} — continuing search')
             time.sleep(2)
         except Exception as e:
             log.debug(f'[Optimizer] Trial {idx} n={n} failed: {e}')
@@ -521,8 +485,16 @@ def fire_no_combo(game_filter=None, target=None, label='', n_legs=10):
             return False
 
     # ── Payout optimizer — find best leg combination ─────────────────
-    best_legs, best_no_bid, best_quote = optimize_combo_payout(
-        leg_dicts, max_trials=14)
+    opt_result = optimize_combo_payout(leg_dicts, max_trials=14)
+
+    # Optimizer may have already placed (4-tuple) or just found best (3-tuple)
+    if len(opt_result) == 4:
+        best_legs, best_no_bid, best_quote, already_placed = opt_result
+        if already_placed:
+            log.info(f'PLACED by optimizer directly ✅')
+            return True
+    else:
+        best_legs, best_no_bid, best_quote = opt_result
 
     if not best_legs or not best_quote:
         log.warning('No valid combo found by optimizer')
