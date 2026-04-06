@@ -52,8 +52,8 @@ for GAME in $GAMES; do
         python3 -c "
 import random
 random.seed()
-from nobot import fire_no_combo
-result = fire_no_combo(game_filter=None, target='$TARGET', label='${GAME}_${i}', n_legs=$LEGS)
+from nobot import fire_anchor_killer_combo
+result = fire_anchor_killer_combo(game_filter=None, target='$TARGET', label='${GAME}_${i}')
 print('SUCCESS' if result else 'FAILED')
 " 2>&1 | grep -E "PLACED|REJECTED|Best combo|true_cost|payout|SUCCESS|FAILED|yes_bid" | tee -a $LOG
 

@@ -650,3 +650,203 @@ if __name__ == '__main__':
             time.sleep(RETRY_SECS)
     else:
         log.warning(f'❌ Failed after {MAX_RETRIES} attempts — yes_c never populated')
+
+
+def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=10):
+    """
+    Anchor+killer NO combo strategy.
+    Anchors: high yes_bid (>=0.82) — make combo cheap, get yes_c>0
+    Killers: MM overprices YES (no_edge>=0.05) — create NO win condition
+    Accepts immediately on first qualifying quote.
+    """
+    import json, sqlite3, math
+    if target is None:
+        import os
+        target = float(os.environ.get('NOBOT_TARGET', '1.00'))
+    else:
+        target = float(target)
+
+    log.info(f'=== {label} ANCHOR+KILLER combo ===')
+    log.info(f'Balance: ${get_balance():.2f}')
+
+    STAT_MAP = {
+        'KXNBAPTS': 'pts', 'KXNBAREB': 'reb', 'KXNBAAST': 'ast',
+        'KXNBA3PT': 'threes', 'KXNBASTL': 'stl', 'KXNBABLK': 'blk'
+    }
+
+    # Load hit rates from cache
+    conn = sqlite3.connect('/root/kalshi-bot-v2/data/cache.db')
+    pa   = {r[0]: json.loads(r[1]) for r in conn.execute('SELECT espn_id, data FROM player_averages').fetchall() if r[1]}
+    gl   = {r[0]: json.loads(r[1]) for r in conn.execute('SELECT espn_id, games_json FROM game_logs').fetchall() if r[1]}
+    conn.close()
+    id_to_name    = {eid: d.get('player_name','') for eid, d in pa.items()}
+    name_to_games = {}
+    for eid, games in gl.items():
+        name = id_to_name.get(eid,'')
+        if name: name_to_games[name.lower()] = games
+
+    def get_hit_rate(player, thresh, stat):
+        plow = player.lower()
+        games = None
+        for name, g in name_to_games.items():
+            parts = plow.split()
+            if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
+                games = g
+                break
+        if not games: return None
+        played = [g for g in games if g.get('min',0) > 10]
+        if len(played) < 5: return None
+        return sum(1 for g in played if g.get(stat,0) >= thresh) / len(played)
+
+    # Pre-game teams
+    from datetime import datetime, timezone, timedelta
+    import requests as _req
+    pt_date = (datetime.now(timezone.utc)-timedelta(hours=7)).strftime('%Y%m%d')
+    r = _req.get('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
+        params={'dates': pt_date}, headers={'User-Agent':'Mozilla/5.0'}, timeout=5)
+    pre_abbrs = set()
+    now = datetime.now(timezone.utc)
+    for e in r.json().get('events',[]):
+        if e.get('status',{}).get('type',{}).get('name','') == 'STATUS_SCHEDULED':
+            tip = datetime.fromisoformat(e.get('date','').replace('Z','+00:00'))
+            if (tip - now).total_seconds() / 60 > 10:
+                for t in e.get('competitions',[{}])[0].get('competitors',[]):
+                    pre_abbrs.add(t['team']['abbreviation'].upper())
+
+    if not pre_abbrs:
+        log.warning('No pre-game teams found')
+        return False
+
+    # Scan and score all props
+    all_scored = []
+    for series, stat in STAT_MAP.items():
+        try:
+            data = _signed_get(f'/trade-api/v2/markets?series_ticker={series}&limit=200&status=open')
+            for m in data.get('markets',[]):
+                if not any(a in m.get('ticker','').upper() for a in pre_abbrs): continue
+                yb  = float(m.get('yes_bid_dollars',0) or 0)
+                yas = float(m.get('yes_ask_size_fp',0) or 0)
+                if yb < 0.30 or yas < 20: continue
+                sub    = (m.get('no_sub_title','') or '').encode('ascii','ignore').decode()
+                player = sub.split(':')[0].strip()
+                try: thresh = int(m['ticker'].split('-')[-1])
+                except: continue
+                hit_rate = get_hit_rate(player, thresh, stat)
+                no_edge  = yb - (hit_rate or yb)
+                role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
+                all_scored.append({
+                    'ticker': m['ticker'], 'player': player, 'sub': sub,
+                    'yes_bid': yb, 'hit_rate': hit_rate, 'no_edge': no_edge,
+                    'role': role,
+                    'game': m['ticker'].split('-')[1][:12] if '-' in m['ticker'] else 'X',
+                })
+            import time; time.sleep(0.2)
+        except Exception as e:
+            log.warning(f'Series {series} error: {e}')
+
+    anchors = sorted([l for l in all_scored if l['role']=='ANCHOR'], key=lambda x: x['yes_bid'], reverse=True)
+    killers = sorted([l for l in all_scored if l['role']=='KILLER'], key=lambda x: x['no_edge'], reverse=True)
+    log.info(f'Pool: {len(anchors)} anchors | {len(killers)} killers')
+
+    def pick_diverse(pool, n, exclude_games=set()):
+        # First pass: 1 per game
+        seen = set(exclude_games)
+        picked = []
+        for l in pool:
+            if l['game'] not in seen:
+                picked.append(l)
+                seen.add(l['game'])
+            if len(picked) >= n: break
+        # Second pass: allow 2 per game if still need more
+        if len(picked) < n:
+            game_count = {}
+            for l in picked: game_count[l['game']] = game_count.get(l['game'],0) + 1
+            for l in pool:
+                if l in picked: continue
+                if game_count.get(l['game'],0) < 2:
+                    picked.append(l)
+                    game_count[l['game']] = game_count.get(l['game'],0) + 1
+                if len(picked) >= n: break
+        return picked
+
+    # Configs: (n_anchors, n_killers) maintaining ~3:1 ratio, up to max_legs
+    configs = [(7,3),(6,2),(8,2),(5,2),(6,3),(8,3),(5,1),(6,1),(7,2),(9,1),(7,0),(8,0),(4,1),(3,1),(4,0),(3,0)]
+    configs = [(a,k) for a,k in configs if a+k <= max_legs and a+k >= 3]
+
+    for n_anchors, n_killers in configs:
+        anc   = pick_diverse(anchors, n_anchors)
+        kil   = pick_diverse(killers, n_killers, {l['game'] for l in anc}) if n_killers else []
+        combo = anc + kil
+        if len(combo) < 3: continue
+
+        log.info(f'Trial {n_anchors}A+{n_killers}K ({len(combo)} legs):')
+        for l in combo:
+            hr = f'{l["hit_rate"]:.0%}' if l['hit_rate'] else '?%'
+            log.info(f'  {"⚓" if l["role"]=="ANCHOR" else "🗡️"} {l["yes_bid"]:.2f} hit={hr} | {l["sub"]}')
+
+        tickers = [l['ticker'] for l in combo]
+        mt, coll = get_collection_ticker(tickers)
+        if not mt: continue
+
+        try:
+            import requests as _r2
+            import base64, time
+            from core.config import config as _cfg
+            from cryptography.hazmat.primitives import hashes as _h, serialization as _s
+            from cryptography.hazmat.primitives.asymmetric import padding as _p
+
+            def _pss(method, path):
+                ts  = str(int(time.time() * 1000))
+                msg = (ts + method + path).encode()
+                key = _s.load_pem_private_key(open(_cfg.KALSHI_KEY_FILE,'rb').read(), password=None)
+                sig = key.sign(msg, _p.PSS(mgf=_p.MGF1(_h.SHA256()), salt_length=_p.PSS.MAX_LENGTH), _h.SHA256())
+                return {'KALSHI-ACCESS-KEY': _cfg.KALSHI_KEY_ID,
+                        'KALSHI-ACCESS-SIGNATURE': base64.b64encode(sig).decode(),
+                        'KALSHI-ACCESS-TIMESTAMP': ts, 'Content-Type': 'application/json'}
+
+            BASE = 'https://api.elections.kalshi.com'
+            rfq_r = _r2.post(f'{BASE}/trade-api/v2/communications/rfqs',
+                headers=_pss('POST','/trade-api/v2/communications/rfqs'),
+                json={'market_ticker': mt, 'mve_collection_ticker': coll,
+                      'target_cost_dollars': str(target), 'rest_remainder': False,
+                      'replace_existing': True,
+                      'mve_selected_legs': [{'market_ticker': t, 'side': 'yes'} for t in tickers]},
+                timeout=8)
+            rfq_id = rfq_r.json().get('id','')
+            if not rfq_id: continue
+            time.sleep(1)
+
+            qs = _r2.get(f'{BASE}/trade-api/v2/communications/quotes',
+                headers=_pss('GET','/trade-api/v2/communications/quotes'),
+                params={'rfq_id': rfq_id, 'rfq_creator_user_id': _cfg.KALSHI_USER_ID},
+                timeout=8).json()
+            quotes = [q for q in qs.get('quotes',[])
+                      if q.get('status')=='open'
+                      and float(q.get('yes_contracts_fp',0) or 0) > 0]
+
+            if not quotes:
+                log.info(f'  no yes_c>0')
+                continue
+
+            best = min(quotes, key=lambda q: 1-float(q.get('yes_bid_dollars',0) or 0))
+            yb   = float(best.get('yes_bid_dollars',0) or 0)
+            tc   = 1 - yb
+            payout = 1/tc
+            log.info(f'  Quote: payout={payout:.2f}x yes_bid={yb:.3f}')
+
+            if payout < 1.5:
+                log.info(f'  Below 1.5x min, trying next')
+                continue
+
+            ok, msg = accept_no(best['id'], quote=best)
+            log.info(f'  Accept: {ok} {msg[:60]}')
+            if ok:
+                log.info(f'PLACED {n_anchors}A+{n_killers}K {payout:.2f}x cost=${tc*float(best.get("yes_contracts_fp",1)):.2f}')
+                return True
+
+        except Exception as e:
+            log.warning(f'Trial error: {e}')
+            continue
+
+    log.warning('No qualifying anchor+killer combo found')
+    return False

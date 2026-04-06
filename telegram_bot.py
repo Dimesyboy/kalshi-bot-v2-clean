@@ -139,28 +139,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 
-    # ── PnL ───────────────────────────────────────────────────────────────
+    # ── PnL Menu ──────────────────────────────────────────────────────────
     elif data == "pnl":
+        await query.edit_message_text("📊 *PnL — Choose View:*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📅 Today (PT)",    callback_data="pnl_today_all"),
+                 InlineKeyboardButton("📅 Yesterday",     callback_data="pnl_yesterday_all")],
+                [InlineKeyboardButton("🤖 Bot Today",     callback_data="pnl_today_bot"),
+                 InlineKeyboardButton("👤 Manual Today",  callback_data="pnl_today_manual")],
+                [InlineKeyboardButton("📈 All Time",      callback_data="pnl_alltime_all"),
+                 InlineKeyboardButton("📈 Bot All Time",  callback_data="pnl_alltime_bot")],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ]))
+
+    elif data.startswith("pnl_"):
+        parts  = data.split("_")
+        period = parts[1]
+        source = parts[2] if len(parts) > 2 else "all"
         try:
-            from data.pnl_report import get_full_pnl, format_report
-            report = get_full_pnl(sync=False)
-            c = report['combos']
-            t = report['today']
-            lines = [
-                f"📊 *Bot PnL Report*\n",
-                f"*Today:* {t['settled']} settled | ${t['pnl']:+.2f}",
-                f"*All time combos:* {c['total']}",
-                f"NO holds: {c['no_wins']}W/{c['no_losses']}L ({c['no_win_rate']}%)",
-                f"YES holds: {c['yes_wins']}W/{c['yes_losses']}L",
-                f"Revenue: ${c['revenue']:.2f} | Cost: ${c['cost']:.2f}",
-                f"*Net PnL: ${c['pnl']:+.2f}*",
-            ]
-            if report.get('best_no_wins'):
-                lines.append("\n🏆 *Best NO wins:*")
-                for w in report['best_no_wins'][:3]:
-                    lines.append(f"  +${w['pnl']:.2f} | {w['date']} | {w['ticker'][-20:]}")
-            await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
-                reply_markup=refresh_back_keyboard("pnl"))
+            from data.pnl_report import get_pnl_by_period, format_period_report
+            report = get_pnl_by_period(period, source)
+            text   = format_period_report(report)
+            await query.edit_message_text(text, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Refresh", callback_data=data),
+                     InlineKeyboardButton("🔙 PnL",     callback_data="pnl")],
+                    [InlineKeyboardButton("🏠 Menu",    callback_data="menu")]
+                ]))
         except Exception as e:
             await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 
@@ -195,8 +201,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game = data.replace("fire_game_", "")
         await query.edit_message_text(f"⏳ Firing NO combo for {game}...")
         try:
-            from nobot import fire_no_combo
-            result = fire_no_combo(game_filter=None, target='1.00', label=game, n_legs=5)
+            from nobot import fire_anchor_killer_combo
+            result = fire_anchor_killer_combo(game_filter=None, target='1.00', label=game)
             if result:
                 await query.edit_message_text(f"✅ *NO combo placed for {game}!*",
                     parse_mode="Markdown", reply_markup=refresh_back_keyboard("positions"))
@@ -209,8 +215,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "fire_slate":
         await query.edit_message_text("⏳ Scanning and firing NO combo...")
         try:
-            from nobot import fire_no_combo
-            result = fire_no_combo(game_filter=None, target='1.00', label='TG', n_legs=5)
+            from nobot import fire_anchor_killer_combo
+            result = fire_anchor_killer_combo(game_filter=None, target='1.00', label='TG')
             if result:
                 await query.edit_message_text("✅ *NO combo placed!*\nCheck positions for details.",
                     parse_mode="Markdown", reply_markup=refresh_back_keyboard("positions"))
