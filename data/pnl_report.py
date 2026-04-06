@@ -207,3 +207,135 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.WARNING)
     report = get_full_pnl()
     print(format_report(report))
+
+
+def get_pt_date(offset_days=0):
+    """Get date in PT timezone with optional day offset."""
+    pt_now = datetime.now(timezone.utc) - timedelta(hours=7)
+    return (pt_now - timedelta(days=offset_days)).date().isoformat()
+
+def get_pnl_by_period(period='today', source='all'):
+    """
+    period: 'today', 'yesterday', 'week', 'alltime'
+    source: 'all', 'bot', 'manual'
+    """
+    conn = get_db()
+
+    pt_today     = get_pt_date(0)
+    pt_yesterday = get_pt_date(1)
+    pt_week      = get_pt_date(7)
+
+    date_filters = {
+        'today':     f"AND DATE(settled_time) = '{pt_today}'",
+        'yesterday': f"AND DATE(settled_time) = '{pt_yesterday}'",
+        'week':      f"AND settled_time >= '{pt_week}'",
+        'alltime':   '',
+    }
+    source_filters = {
+        'all':    '',
+        'bot':    'AND COALESCE(is_bot,0) = 1',
+        'manual': 'AND COALESCE(is_bot,0) = 0',
+    }
+
+    df = date_filters.get(period, '')
+    sf = source_filters.get(source, '')
+
+    rows = conn.execute(f"""
+        SELECT ticker, event_ticker, settled_time, market_result,
+               yes_count_fp, no_count_fp, yes_cost, no_cost,
+               revenue, fee_cost, pnl, is_combo,
+               COALESCE(is_bot,0) as is_bot
+        FROM portfolio_settlements
+        WHERE 1=1 {df} {sf}
+        ORDER BY settled_time DESC
+    """).fetchall()
+    conn.close()
+
+    combos  = [r for r in rows if r['is_combo']]
+    singles = [r for r in rows if not r['is_combo']]
+
+    def summarize(rs):
+        wins    = [r for r in rs if r['revenue'] > 0]
+        losses  = [r for r in rs if r['revenue'] == 0 and ((r['no_cost'] or 0)+(r['yes_cost'] or 0)) > 0]
+        rev     = sum(r['revenue'] for r in rs)
+        cost    = sum((r['no_cost'] or 0)+(r['yes_cost'] or 0) for r in rs)
+        fees    = sum(r['fee_cost'] or 0 for r in rs)
+        pnl     = rev - cost - fees
+        return {'n': len(rs), 'wins': len(wins), 'losses': len(losses),
+                'rev': round(rev,2), 'cost': round(cost,2),
+                'fees': round(fees,2), 'pnl': round(pnl,2),
+                'win_rate': round(len(wins)/(len(wins)+len(losses))*100,1) if (wins or losses) else 0}
+
+    cs = summarize(combos)
+    ss = summarize(singles)
+
+    # Best wins in period
+    best = sorted([r for r in combos if r['revenue'] > 0],
+                  key=lambda r: r['pnl'], reverse=True)[:5]
+
+    # Worst losses
+    worst = sorted([r for r in combos if r['revenue'] == 0 and (r['no_cost'] or 0) > 0.10],
+                   key=lambda r: r['pnl'])[:5]
+
+    return {
+        'period':   period,
+        'source':   source,
+        'pt_date':  pt_today,
+        'combos':   cs,
+        'singles':  ss,
+        'total_pnl': round(cs['pnl'] + ss['pnl'], 2),
+        'best_wins':  [{'ticker': dict(r)['event_ticker'][-20:],
+                        'pnl': round(r['pnl'],2), 'cost': round((r['no_cost'] or 0),2),
+                        'rev': round(r['revenue'],2), 'time': str(r['settled_time'])[:16],
+                        'bot': r['is_bot']} for r in best],
+        'worst_losses': [{'ticker': dict(r)['event_ticker'][-20:],
+                          'pnl': round(r['pnl'],2), 'cost': round((r['no_cost'] or 0),2),
+                          'time': str(r['settled_time'])[:16],
+                          'bot': r['is_bot']} for r in worst],
+    }
+
+
+def format_period_report(data: dict) -> str:
+    c = data['combos']
+    s = data['singles']
+    period_label = {
+        'today': f"TODAY ({data['pt_date']} PT)",
+        'yesterday': 'YESTERDAY (PT)',
+        'week': 'LAST 7 DAYS',
+        'alltime': 'ALL TIME',
+    }.get(data['period'], data['period'].upper())
+
+    source_label = {'all':'All','bot':'🤖 Bot','manual':'👤 Manual'}.get(data['source'],'')
+
+    lines = [f"📊 *{period_label} — {source_label}*", '']
+
+    if c['n']:
+        lines += [
+            f"*Combos* ({c['n']} settled)",
+            f"  W/L: {c['wins']}/{c['losses']} ({c['win_rate']}% win rate)",
+            f"  Cost: ${c['cost']:.2f} | Rev: ${c['rev']:.2f} | PnL: ${c['pnl']:+.2f}",
+        ]
+    if s['n']:
+        lines += [
+            f"*Singles* ({s['n']} settled)",
+            f"  W/L: {s['wins']}/{s['losses']} ({s['win_rate']}% win rate)",
+            f"  Cost: ${s['cost']:.2f} | Rev: ${s['rev']:.2f} | PnL: ${s['pnl']:+.2f}",
+        ]
+
+    lines += ['', f"*Net PnL: ${data['total_pnl']:+.2f}*"]
+
+    if data['best_wins']:
+        lines.append('')
+        lines.append('✅ *Best wins:*')
+        for w in data['best_wins']:
+            src = '🤖' if w['bot'] else '👤'
+            lines.append(f"  {src} +${w['pnl']:.2f} ({w['rev']:.2f}/{w['cost']:.2f}) {w['time'][5:16]}")
+
+    if data['worst_losses']:
+        lines.append('')
+        lines.append('❌ *Worst losses:*')
+        for w in data['worst_losses']:
+            src = '🤖' if w['bot'] else '👤'
+            lines.append(f"  {src} ${w['pnl']:.2f} (cost ${w['cost']:.2f}) {w['time'][5:16]}")
+
+    return '\n'.join(lines)
