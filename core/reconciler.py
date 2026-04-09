@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 log = logging.getLogger("kalshi_bot.reconciler")
+log.propagate = False
 
 BOT_ORDERS_FILE = "/root/kalshi-bot-v2/data/bot_orders.json"
 RECON_FILE      = "/root/kalshi-bot-v2/data/reconciler_state.json"

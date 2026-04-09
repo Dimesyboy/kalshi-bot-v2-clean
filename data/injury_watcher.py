@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 
 log = logging.getLogger('kalshi_bot.injuries')
+log.propagate = False
 DB  = '/root/kalshi-bot-v2/data/cache.db'
 
 def fetch_and_store():

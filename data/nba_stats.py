@@ -16,6 +16,7 @@ from data.persistent_cache import (
 )
 
 log = logging.getLogger("kalshi_bot.data.nba_stats")
+log.propagate = False
 
 stats_cache = TTLCache(default_ttl=3600)   # 1 hour — stats don't change mid-game
 

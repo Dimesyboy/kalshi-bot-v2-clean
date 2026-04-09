@@ -32,6 +32,7 @@ from core.kalshi_client import _signed_get
 from core.config import config
 
 log = logging.getLogger('kalshi_bot.orderbook_monitor')
+log.propagate = False
 
 DB_PATH      = '/root/kalshi-bot-v2/data/orderbook.db'
 BASE         = 'https://api.elections.kalshi.com'
@@ -435,9 +436,11 @@ def purge_old_data():
                 log.info(f"[OBMonitor] Purged {r.rowcount} rows from {table}")
         except Exception as e:
             log.debug(f"Purge failed {table}: {e}")
-    conn.execute("VACUUM")
     conn.commit()
     conn.close()
+    vconn = sqlite3.connect(DB_PATH, isolation_level=None)
+    vconn.execute("VACUUM")
+    vconn.close()
 
 
 def run_monitor():

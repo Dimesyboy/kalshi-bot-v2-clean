@@ -9,8 +9,13 @@ Uses every signal we've discovered:
   5. accept YES mechanic — genuine NO hold (win if any leg fails)
 """
 import time, requests, base64, re, logging, json
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
-log = logging.getLogger('fire_no')
+log = logging.getLogger("fire_no")
+log.setLevel(logging.INFO)
+log.propagate = False
+if not log.handlers:
+    _fh = logging.FileHandler("/root/kalshi-bot-v2/logs/nobot.log", mode="a")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    log.addHandler(_fh)
 
 from core.kalshi_client import _signed_get, get_balance, get_positions_raw
 from core.config import config
@@ -652,7 +657,7 @@ if __name__ == '__main__':
         log.warning(f'❌ Failed after {MAX_RETRIES} attempts — yes_c never populated')
 
 
-def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=10):
+def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=10, pre_qualified_legs=None):
     """
     Anchor+killer NO combo strategy.
     Anchors: high yes_bid (>=0.82) — make combo cheap, get yes_c>0
@@ -766,91 +771,96 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
     except Exception as e:
         log.warning(f'Watcher signals failed: {e}')
 
-    # Fetch fresh injury data
+    # Load injury data from DB (refreshed every 30min by cron)
     try:
-        from data.injury_watcher import fetch_and_store, get_injury_status
-        fetch_and_store()
+        from data.injury_watcher import get_injury_status
         injury_lookup = True
-        log.info('Injury data refreshed')
     except Exception as e:
-        log.warning(f'Injury fetch failed: {e}')
+        log.warning(f'Injury load failed: {e}')
         injury_lookup = False
 
-    # Scan and score all props
-    all_scored = []
-    for series, stat in STAT_MAP.items():
-        try:
-            data = _signed_get(f'/trade-api/v2/markets?series_ticker={series}&limit=200&status=open')
-            for m in data.get('markets',[]):
-                if not any(a in m.get('ticker','').upper() for a in pre_abbrs): continue
-                yb  = float(m.get('yes_bid_dollars',0) or 0)
-                yas = float(m.get('yes_ask_size_fp',0) or 0)
-                if yb < 0.30 or yas < 20: continue
-                sub    = (m.get('no_sub_title','') or '').encode('ascii','ignore').decode()
-                player = sub.split(':')[0].strip()
-                try: thresh = int(m['ticker'].split('-')[-1])
-                except: continue
-                p_uuid = (m.get('custom_strike') or {}).get('basketball_player','')
-                hit_rate = get_hit_rate(player, thresh, stat, player_uuid=p_uuid)
+    # If pre-qualified legs provided by firing_loop — skip full API scan
+    if pre_qualified_legs is not None:
+        anchors_pre, killers_pre = pre_qualified_legs
+        log.info(f'Pre-qualified: {len(anchors_pre)} anchors | {len(killers_pre)} killers')
+        anchors = sorted(anchors_pre, key=lambda x: x['yes_bid'], reverse=True)
+        killers = sorted(killers_pre, key=lambda x: x.get('no_edge',0), reverse=True)
+    else:
+        # Scan and score all props
+        all_scored = []
+        for series, stat in STAT_MAP.items():
+            try:
+                data = _signed_get(f'/trade-api/v2/markets?series_ticker={series}&limit=200&status=open')
+                for m in data.get('markets',[]):
+                    if not any(a in m.get('ticker','').upper() for a in pre_abbrs): continue
+                    yb  = float(m.get('yes_bid_dollars',0) or 0)
+                    yas = float(m.get('yes_ask_size_fp',0) or 0)
+                    if yb < 0.30 or yas < 20: continue
+                    sub    = (m.get('no_sub_title','') or '').encode('ascii','ignore').decode()
+                    player = sub.split(':')[0].strip()
+                    try: thresh = int(m['ticker'].split('-')[-1])
+                    except: continue
+                    p_uuid = (m.get('custom_strike') or {}).get('basketball_player','')
+                    hit_rate = get_hit_rate(player, thresh, stat, player_uuid=p_uuid)
 
-                # Apply injury adjustment
-                inj_impact = 0.0
-                if injury_lookup:
-                    try:
-                        inj_impact = get_injury_status(player)
-                    except: pass
-                if inj_impact == -1.0:
-                    log.info(f'  Skipping {player} — OUT')
-                    continue
-                if hit_rate and inj_impact < 0:
-                    hit_rate = max(0.0, hit_rate + inj_impact)
-                    log.info(f'  {player} injury adjusted hit_rate → {hit_rate:.2f}')
+                    # Apply injury adjustment
+                    inj_impact = 0.0
+                    if injury_lookup:
+                        try:
+                            inj_impact = get_injury_status(player)
+                        except: pass
+                    if inj_impact == -1.0:
+                        log.info(f'  Skipping {player} — OUT')
+                        continue
+                    if hit_rate and inj_impact < 0:
+                        hit_rate = max(0.0, hit_rate + inj_impact)
+                        log.info(f'  {player} injury adjusted hit_rate → {hit_rate:.2f}')
 
-                # Use pre-computed no_edge from killer_map if available
-                series_key = {'pts':'KXNBAPTS','reb':'KXNBAREB','ast':'KXNBAAST',
-                              'threes':'KXNBA3PT','stl':'KXNBASTL','blk':'KXNBABLK'}.get(stat,'')
-                k_key = (p_uuid, series_key, float(thresh))
-                if k_key in killer_map:
-                    hit_rate, no_edge = killer_map[k_key]
-                    role = 'KILLER'
-                else:
-                    no_edge = yb - (hit_rate or yb)
-                    role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
-
-                # Watcher boost — if orderbook sees smart money or OI growth, upgrade role
-                ws = watcher_signals.get(m['ticker'])
-                watcher_boost = 0.0
-                if ws:
-                    watcher_boost = ws['smart_money'] * 0.1 + ws['oi_signal'] * 0.1
-                    # Upgrade NEUTRAL to KILLER if watcher sees unusual activity
-                    if role == 'NEUTRAL' and ws['signal_score'] > 0.7 and no_edge > 0.02:
+                    # Use pre-computed no_edge from killer_map if available
+                    series_key = {'pts':'KXNBAPTS','reb':'KXNBAREB','ast':'KXNBAAST',
+                                  'threes':'KXNBA3PT','stl':'KXNBASTL','blk':'KXNBABLK'}.get(stat,'')
+                    k_key = (p_uuid, series_key, float(thresh))
+                    if k_key in killer_map:
+                        hit_rate, no_edge = killer_map[k_key]
                         role = 'KILLER'
-                        log.info(f'Watcher upgraded {player}:{thresh} to KILLER (signal={ws["signal_score"]:.2f})')
+                    else:
+                        no_edge = yb - (hit_rate or yb)
+                        role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
 
-                all_scored.append({
-                    'ticker': m['ticker'], 'player': player, 'sub': sub,
-                    'yes_bid': yb, 'hit_rate': hit_rate, 'no_edge': no_edge,
-                    'role': role, 'watcher_boost': watcher_boost,
-                    'game': m['ticker'].split('-')[1][:12] if '-' in m['ticker'] else 'X',
-                })
-            import time; time.sleep(0.2)
-        except Exception as e:
-            log.warning(f'Series {series} error: {e}')
+                    # Watcher boost — if orderbook sees smart money or OI growth, upgrade role
+                    ws = watcher_signals.get(m['ticker'])
+                    watcher_boost = 0.0
+                    if ws:
+                        watcher_boost = ws['smart_money'] * 0.1 + ws['oi_signal'] * 0.1
+                        # Upgrade NEUTRAL to KILLER if watcher sees unusual activity
+                        if role == 'NEUTRAL' and ws['signal_score'] > 0.7 and no_edge > 0.02:
+                            role = 'KILLER'
+                            log.info(f'Watcher upgraded {player}:{thresh} to KILLER (signal={ws["signal_score"]:.2f})')
 
-    anchors = sorted([l for l in all_scored if l['role']=='ANCHOR'],
-                     key=lambda x: x['yes_bid'] + x['watcher_boost'], reverse=True)
-    killers = sorted([l for l in all_scored if l['role']=='KILLER'],
-                     key=lambda x: x['no_edge'] + x['watcher_boost'], reverse=True)
+                    all_scored.append({
+                        'ticker': m['ticker'], 'player': player, 'sub': sub,
+                        'yes_bid': yb, 'hit_rate': hit_rate, 'no_edge': no_edge,
+                        'role': role, 'watcher_boost': watcher_boost,
+                        'game': m['ticker'].split('-')[1][:12] if '-' in m['ticker'] else 'X',
+                    })
+                import time; time.sleep(0.2)
+            except Exception as e:
+                log.warning(f'Series {series} error: {e}')
 
-    # If anchor pool is thin, lower threshold to 0.78
-    if len(anchors) < 5:
-        extra = [l for l in all_scored if l['role']=='NEUTRAL' and l['yes_bid'] >= 0.78]
-        for l in extra:
-            l['role'] = 'ANCHOR'
-            anchors.append(l)
-        anchors.sort(key=lambda x: x['yes_bid'], reverse=True)
-        if extra:
-            log.info(f'Thin pool — added {len(extra)} legs at 0.78+ as anchors')
+        anchors = sorted([l for l in all_scored if l['role']=='ANCHOR'],
+                         key=lambda x: x['yes_bid'] + x['watcher_boost'], reverse=True)
+        killers = sorted([l for l in all_scored if l['role']=='KILLER'],
+                         key=lambda x: x['no_edge'] + x['watcher_boost'], reverse=True)
+
+        # If anchor pool is thin, lower threshold to 0.78
+        if len(anchors) < 5:
+            extra = [l for l in all_scored if l['role']=='NEUTRAL' and l['yes_bid'] >= 0.78]
+            for l in extra:
+                l['role'] = 'ANCHOR'
+                anchors.append(l)
+            anchors.sort(key=lambda x: x['yes_bid'], reverse=True)
+            if extra:
+                log.info(f'Thin pool — added {len(extra)} legs at 0.78+ as anchors')
 
     log.info(f'Pool: {len(anchors)} anchors | {len(killers)} killers')
 

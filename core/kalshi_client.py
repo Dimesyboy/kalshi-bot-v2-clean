@@ -14,6 +14,7 @@ from typing import Optional
 from core.config import config
 
 log = logging.getLogger("kalshi_bot.client")
+log.propagate = False
 
 _kalshi_client = None
 

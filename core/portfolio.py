@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from core.config import config
 
 log = logging.getLogger('kalshi_bot.portfolio')
+log.propagate = False
 
 BASE    = 'https://api.elections.kalshi.com'
 DB_PATH = '/root/kalshi-bot-v2/data/positions.db'
