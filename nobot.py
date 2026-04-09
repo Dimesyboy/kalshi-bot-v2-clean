@@ -717,6 +717,16 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
         log.warning('No pre-game teams found')
         return False
 
+    # Load watcher signals for orderbook-based scoring boost
+    watcher_signals = {}
+    try:
+        from data.orderbook_monitor import get_watcher_signals
+        sigs = get_watcher_signals(min_yes_bid=0.30, mins_to_tip_max=120, lookback_mins=60)
+        watcher_signals = {s['ticker']: s for s in sigs}
+        log.info(f'Watcher signals: {len(watcher_signals)} legs in window')
+    except Exception as e:
+        log.warning(f'Watcher signals failed: {e}')
+
     # Scan and score all props
     all_scored = []
     for series, stat in STAT_MAP.items():
@@ -734,18 +744,31 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
                 hit_rate = get_hit_rate(player, thresh, stat)
                 no_edge  = yb - (hit_rate or yb)
                 role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
+
+                # Watcher boost — if orderbook sees smart money or OI growth, upgrade role
+                ws = watcher_signals.get(m['ticker'])
+                watcher_boost = 0.0
+                if ws:
+                    watcher_boost = ws['smart_money'] * 0.1 + ws['oi_signal'] * 0.1
+                    # Upgrade NEUTRAL to KILLER if watcher sees unusual activity
+                    if role == 'NEUTRAL' and ws['signal_score'] > 0.7 and no_edge > 0.02:
+                        role = 'KILLER'
+                        log.info(f'Watcher upgraded {player}:{thresh} to KILLER (signal={ws["signal_score"]:.2f})')
+
                 all_scored.append({
                     'ticker': m['ticker'], 'player': player, 'sub': sub,
                     'yes_bid': yb, 'hit_rate': hit_rate, 'no_edge': no_edge,
-                    'role': role,
+                    'role': role, 'watcher_boost': watcher_boost,
                     'game': m['ticker'].split('-')[1][:12] if '-' in m['ticker'] else 'X',
                 })
             import time; time.sleep(0.2)
         except Exception as e:
             log.warning(f'Series {series} error: {e}')
 
-    anchors = sorted([l for l in all_scored if l['role']=='ANCHOR'], key=lambda x: x['yes_bid'], reverse=True)
-    killers = sorted([l for l in all_scored if l['role']=='KILLER'], key=lambda x: x['no_edge'], reverse=True)
+    anchors = sorted([l for l in all_scored if l['role']=='ANCHOR'],
+                     key=lambda x: x['yes_bid'] + x['watcher_boost'], reverse=True)
+    killers = sorted([l for l in all_scored if l['role']=='KILLER'],
+                     key=lambda x: x['no_edge'] + x['watcher_boost'], reverse=True)
     log.info(f'Pool: {len(anchors)} anchors | {len(killers)} killers')
 
     def pick_diverse(pool, n, exclude_games=set()):

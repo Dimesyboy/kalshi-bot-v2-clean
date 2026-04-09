@@ -472,3 +472,89 @@ def run_monitor():
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
     run_monitor()
+
+
+def get_watcher_signals(min_yes_bid=0.40, mins_to_tip_max=120, lookback_mins=30):
+    """
+    Query orderbook snapshots for legs in the pre-game window.
+    Returns scored legs with smart money, OI, and yes_bid trajectory signals.
+    Called by nobot before building the leg pool.
+    """
+    import sqlite3
+    from datetime import datetime, timezone, timedelta
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    rows = conn.execute('''
+        SELECT
+            player_name,
+            ticker,
+            floor_strike                            as threshold,
+            player_uuid,
+            AVG(yes_bid)                            as avg_yb,
+            MAX(yes_bid)                            as max_yb,
+            MIN(yes_bid)                            as min_yb,
+            MAX(yes_bid) - MIN(yes_bid)             as yb_range,
+            MAX(yes_bid) - MIN(yes_bid)
+                / NULLIF(MIN(yes_bid), 0)           as yb_pct_move,
+            AVG(yes_bid_size)                       as avg_bid_size,
+            MAX(yes_bid_size)                       as max_bid_size,
+            AVG(open_interest_fp)                   as avg_oi,
+            MAX(open_interest_fp) - MIN(open_interest_fp) as oi_delta,
+            AVG(volume_24h_fp)                      as avg_vol,
+            AVG(minutes_to_tip)                     as avg_mins_to_tip,
+            COUNT(*)                                as snap_count,
+            MAX(snap_time)                          as latest_snap
+        FROM market_snapshots
+        WHERE snap_time >= datetime('now', ? || ' minutes')
+        AND player_name != ''
+        AND floor_strike > 0
+        AND yes_bid >= ?
+        AND minutes_to_tip BETWEEN 0 AND ?
+        GROUP BY ticker
+        HAVING COUNT(*) >= 2
+        ORDER BY avg_yb DESC
+    ''', (f'-{lookback_mins}', min_yes_bid, mins_to_tip_max)).fetchall()
+
+    conn.close()
+
+    signals = []
+    for r in rows:
+        r = dict(r)
+
+        # Smart money score: large bid size relative to ask
+        smart_money = min(1.0, (r['max_bid_size'] or 0) / 200)
+
+        # Momentum: yes_bid rising = MM pricing it higher = likely to hit
+        momentum = r['yb_range'] or 0
+
+        # OI growth = real money entering
+        oi_signal = min(1.0, (r['oi_delta'] or 0) / 50)
+
+        # Composite signal score
+        signal_score = (
+            r['avg_yb'] * 0.6 +
+            smart_money * 0.2 +
+            oi_signal   * 0.1 +
+            momentum    * 0.1
+        )
+
+        signals.append({
+            'ticker':       r['ticker'],
+            'player':       r['player_name'],
+            'threshold':    r['threshold'],
+            'player_uuid':  r['player_uuid'],
+            'yes_bid':      round(r['avg_yb'], 4),
+            'yes_bid_max':  round(r['max_yb'], 4),
+            'yes_bid_min':  round(r['min_yb'], 4),
+            'yb_momentum':  round(momentum, 4),
+            'smart_money':  round(smart_money, 3),
+            'oi_signal':    round(oi_signal, 3),
+            'signal_score': round(signal_score, 4),
+            'snap_count':   r['snap_count'],
+            'mins_to_tip':  round(r['avg_mins_to_tip'] or 0),
+            'latest_snap':  r['latest_snap'],
+        })
+
+    return sorted(signals, key=lambda x: x['signal_score'], reverse=True)
