@@ -685,12 +685,17 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
         name = id_to_name.get(eid,'')
         if name: name_to_games[name.lower()] = games
 
+    def normalize(s):
+        import unicodedata
+        return unicodedata.normalize('NFKD', s).encode('ascii','ignore').decode().lower()
+
     def get_hit_rate(player, thresh, stat):
-        plow = player.lower()
+        plow = normalize(player)
         games = None
         for name, g in name_to_games.items():
+            nname = normalize(name)
             parts = plow.split()
-            if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
+            if len(parts) >= 2 and parts[0] in nname and parts[-1] in nname:
                 games = g
                 break
         if not games: return None
