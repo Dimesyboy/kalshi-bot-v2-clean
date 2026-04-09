@@ -689,7 +689,28 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
         import unicodedata
         return unicodedata.normalize('NFKD', s).encode('ascii','ignore').decode().lower()
 
-    def get_hit_rate(player, thresh, stat):
+    # Load Kalshi-derived hit rates (higher priority — real game results)
+    kalshi_hr_conn = sqlite3.connect('/root/kalshi-bot-v2/data/cache.db')
+    kalshi_hr_rows = kalshi_hr_conn.execute(
+        'SELECT player_uuid, series, threshold, hit_rate, games FROM kalshi_hit_rates'
+    ).fetchall()
+    kalshi_hr_conn.close()
+    kalshi_hr = {(r[0], r[1], r[2]): (r[3], r[4]) for r in kalshi_hr_rows}
+    log.info(f'Kalshi hit rates loaded: {len(kalshi_hr)} records')
+
+    def get_hit_rate(player, thresh, stat, player_uuid=''):
+        # Priority 1: Kalshi-derived hit rates (real results)
+        series_map = {'pts':'KXNBAPTS','reb':'KXNBAREB','ast':'KXNBAAST',
+                      'threes':'KXNBA3PT','stl':'KXNBASTL','blk':'KXNBABLK'}
+        series = series_map.get(stat,'')
+        if player_uuid and series:
+            key = (player_uuid, series, float(thresh))
+            if key in kalshi_hr:
+                hr, games = kalshi_hr[key]
+                log.debug(f'Kalshi HR: {player} {thresh}+ = {hr:.2f} ({games}g)')
+                return hr
+
+        # Priority 2: ESPN game logs
         plow = normalize(player)
         games = None
         for name, g in name_to_games.items():
@@ -756,7 +777,8 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
                 player = sub.split(':')[0].strip()
                 try: thresh = int(m['ticker'].split('-')[-1])
                 except: continue
-                hit_rate = get_hit_rate(player, thresh, stat)
+                p_uuid = (m.get('custom_strike') or {}).get('basketball_player','')
+                hit_rate = get_hit_rate(player, thresh, stat, player_uuid=p_uuid)
 
                 # Apply injury adjustment
                 inj_impact = 0.0
