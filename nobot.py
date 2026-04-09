@@ -742,16 +742,6 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
         log.warning(f'Injury fetch failed: {e}')
         injury_lookup = False
 
-    # Fetch fresh injury data
-    try:
-        from data.injury_watcher import fetch_and_store, get_injury_status
-        fetch_and_store()
-        injury_lookup = True
-        log.info('Injury data refreshed')
-    except Exception as e:
-        log.warning(f'Injury fetch failed: {e}')
-        injury_lookup = False
-
     # Scan and score all props
     all_scored = []
     for series, stat in STAT_MAP.items():
@@ -808,6 +798,17 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
                      key=lambda x: x['yes_bid'] + x['watcher_boost'], reverse=True)
     killers = sorted([l for l in all_scored if l['role']=='KILLER'],
                      key=lambda x: x['no_edge'] + x['watcher_boost'], reverse=True)
+
+    # If anchor pool is thin, lower threshold to 0.78
+    if len(anchors) < 5:
+        extra = [l for l in all_scored if l['role']=='NEUTRAL' and l['yes_bid'] >= 0.78]
+        for l in extra:
+            l['role'] = 'ANCHOR'
+            anchors.append(l)
+        anchors.sort(key=lambda x: x['yes_bid'], reverse=True)
+        if extra:
+            log.info(f'Thin pool — added {len(extra)} legs at 0.78+ as anchors')
+
     log.info(f'Pool: {len(anchors)} anchors | {len(killers)} killers')
 
     def pick_diverse(pool, n, exclude_games=set()):
