@@ -585,8 +585,8 @@ async def cmd_fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game = context.args[0].upper() if context.args else None
     label = game or 'SLATE'
     await update.message.reply_text(f"🔴 Firing NO combo ({label})...")
-    from nobot import fire_no_combo
-    result = fire_no_combo(game_filter=game, target='1.00', label=label, n_legs=5)
+    from nobot import fire_anchor_killer_combo
+    result = fire_anchor_killer_combo(game_filter=None, target='1.00', label=label)
     if result:
         await update.message.reply_text("✅ NO combo placed! Use /positions to check.",
             reply_markup=main_menu_keyboard())
