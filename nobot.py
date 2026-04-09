@@ -866,10 +866,21 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
                 log.info(f'  Below 1.5x min, trying next')
                 continue
 
+            # Quarter Kelly sizing — max 10% of balance
+            win_prob   = 1 - tc
+            odds       = payout - 1
+            kelly_f    = max(0, (win_prob * odds - (1 - win_prob)) / odds) if odds > 0 else 0
+            max_stake  = bal * 0.10
+            stake      = bal * kelly_f * 0.25
+            stake      = round(max(0.50, min(max_stake, stake)), 2)
+            contracts  = max(1, int(stake / tc))
+            actual_cost = round(tc * contracts, 2)
+            log.info(f'  Kelly: win_prob={win_prob:.3f} f={kelly_f:.3f} stake=${stake:.2f} ({kelly_f*25:.1f}% bal) contracts={contracts} cost=${actual_cost:.2f}')
+
             ok, msg = accept_no(best['id'], quote=best)
             log.info(f'  Accept: {ok} {msg[:60]}')
             if ok:
-                log.info(f'PLACED {n_anchors}A+{n_killers}K {payout:.2f}x cost=${tc*float(best.get("yes_contracts_fp",1)):.2f}')
+                log.info(f'PLACED {n_anchors}A+{n_killers}K {payout:.2f}x contracts={contracts} cost=${actual_cost:.2f}')
                 return True
 
         except Exception as e:
