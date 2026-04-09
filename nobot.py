@@ -915,6 +915,38 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
             log.info(f'  Accept: {ok} {msg[:60]}')
             if ok:
                 log.info(f'PLACED {n_anchors}A+{n_killers}K {payout:.2f}x contracts={contracts} cost=${actual_cost:.2f}')
+
+                # Log to positions.db
+                try:
+                    quote_id = best.get('id', '')
+                    from data.positions_db import record_order, record_fill
+                    leg_desc = "+".join([l["player"][:12] for l in combo[:3]])
+                    record_order(
+                        order_id=quote_id, client_order_id=quote_id,
+                        ticker=mt, strategy='nobot_anchor_killer',
+                        side='no', price_cents=int(tc*100),
+                        contracts=contracts, source='bot'
+                    )
+                    record_fill(
+                        ticker=mt, order_id=quote_id,
+                        client_order_id=quote_id, side='no',
+                        qty=contracts, fill_price=int(tc*100),
+                        source='bot', strategy='nobot_anchor_killer',
+                        confidence=float(n_anchors)/float(n_anchors+max(n_killers,1)),
+                        edge=payout, hit_rate=tc,
+                        reason=f'{n_anchors}A+{n_killers}K {payout:.2f}x | {leg_desc}'
+                    )
+                    # Register with reconciler for is_bot attribution
+                    try:
+                        from core.reconciler import get_reconciler
+                        _recon = get_reconciler()
+                        _recon.register_bot_order(quote_id, quote_id)
+                        log.info(f'Logged to positions.db + reconciler ✅')
+                    except Exception as re:
+                        log.warning(f'Reconciler registration failed: {re}')
+                except Exception as db_e:
+                    log.warning(f'DB logging failed: {db_e}')
+
                 return True
 
         except Exception as e:
