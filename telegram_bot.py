@@ -31,6 +31,8 @@ def main_menu_keyboard():
          InlineKeyboardButton("⚡ Live Scores",  callback_data="live")],
         [InlineKeyboardButton("📐 Totals",       callback_data="totals"),
          InlineKeyboardButton("🎯 Props",        callback_data="props")],
+        [InlineKeyboardButton("🏥 Injuries",     callback_data="injuries"),
+         InlineKeyboardButton("📊 Edge Legs",    callback_data="edge_legs")],
         [InlineKeyboardButton("🔄 Reconcile",    callback_data="reconcile"),
          InlineKeyboardButton("⚙️ Settings",     callback_data="settings")],
     ])
@@ -340,6 +342,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"  {str(r[0])[11:16]} no_bid={r[1]:.3f} ({r[2]:.1f}x) T-{r[3]:.0f}min")
             await query.edit_message_text('\n'.join(lines), parse_mode="Markdown",
                 reply_markup=refresh_back_keyboard("obdata"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Injuries ─────────────────────────────────────────────────────────
+    elif data == "injuries":
+        try:
+            from data.injury_watcher import fetch_and_store, get_all_injuries
+            fetch_and_store()
+            out  = get_all_injuries('out')
+            dtd  = get_all_injuries('day-to-day')
+            lines = [f"🏥 *NBA Injuries*\n"]
+            lines.append(f"*OUT ({len(out)}):*")
+            for i in out[:15]:
+                lines.append(f"  ❌ {i['name']} ({i['type'] or '?'})")
+            if len(out) > 15:
+                lines.append(f"  _...and {len(out)-15} more_")
+            lines.append(f"\n*Day-to-Day ({len(dtd)}):*")
+            for i in dtd[:10]:
+                lines.append(f"  ⚠️ {i['name']} ({i['type'] or '?'})")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("injuries"))
+        except Exception as e:
+            await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
+
+    # ── Edge Legs ─────────────────────────────────────────────────────────
+    elif data == "edge_legs":
+        try:
+            import json, sqlite3
+            from data.injury_watcher import get_injury_status
+            conn = sqlite3.connect('/root/kalshi-bot-v2/data/cache.db')
+            pa   = {r[0]: json.loads(r[1]) for r in conn.execute('SELECT espn_id, data FROM player_averages').fetchall() if r[1]}
+            gl   = {r[0]: json.loads(r[1]) for r in conn.execute('SELECT espn_id, games_json FROM game_logs').fetchall() if r[1]}
+            conn.close()
+            id_to_name    = {eid: d.get('player_name','') for eid, d in pa.items()}
+            name_to_games = {}
+            for eid, games in gl.items():
+                name = id_to_name.get(eid,'')
+                if name: name_to_games[name.lower()] = games
+
+            from data.orderbook_monitor import get_watcher_signals
+            sigs = get_watcher_signals(min_yes_bid=0.40, mins_to_tip_max=120, lookback_mins=60)
+
+            lines = [f"🎯 *Edge Legs in Window*\n"]
+            if not sigs:
+                lines.append("No legs in pre-game window right now")
+            else:
+                lines.append(f"{len(sigs)} legs tracked:")
+                for s in sigs[:15]:
+                    inj = get_injury_status(s['player'])
+                    inj_str = ' ❌OUT' if inj == -1.0 else (' ⚠️DTD' if inj < 0 else '')
+                    lines.append(f"  {s['yes_bid']:.2f} yb | score={s['signal_score']:.2f} | {s['player']}{inj_str}")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
+                reply_markup=refresh_back_keyboard("edge_legs"))
         except Exception as e:
             await query.edit_message_text(f"❌ {e}", reply_markup=back_keyboard())
 

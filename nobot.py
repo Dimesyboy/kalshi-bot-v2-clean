@@ -732,6 +732,26 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
     except Exception as e:
         log.warning(f'Watcher signals failed: {e}')
 
+    # Fetch fresh injury data
+    try:
+        from data.injury_watcher import fetch_and_store, get_injury_status
+        fetch_and_store()
+        injury_lookup = True
+        log.info('Injury data refreshed')
+    except Exception as e:
+        log.warning(f'Injury fetch failed: {e}')
+        injury_lookup = False
+
+    # Fetch fresh injury data
+    try:
+        from data.injury_watcher import fetch_and_store, get_injury_status
+        fetch_and_store()
+        injury_lookup = True
+        log.info('Injury data refreshed')
+    except Exception as e:
+        log.warning(f'Injury fetch failed: {e}')
+        injury_lookup = False
+
     # Scan and score all props
     all_scored = []
     for series, stat in STAT_MAP.items():
@@ -747,6 +767,20 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
                 try: thresh = int(m['ticker'].split('-')[-1])
                 except: continue
                 hit_rate = get_hit_rate(player, thresh, stat)
+
+                # Apply injury adjustment
+                inj_impact = 0.0
+                if injury_lookup:
+                    try:
+                        inj_impact = get_injury_status(player)
+                    except: pass
+                if inj_impact == -1.0:
+                    log.info(f'  Skipping {player} — OUT')
+                    continue
+                if hit_rate and inj_impact < 0:
+                    hit_rate = max(0.0, hit_rate + inj_impact)
+                    log.info(f'  {player} injury adjusted hit_rate → {hit_rate:.2f}')
+
                 no_edge  = yb - (hit_rate or yb)
                 role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
 
