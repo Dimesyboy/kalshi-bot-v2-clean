@@ -55,7 +55,7 @@ random.seed()
 from nobot import fire_anchor_killer_combo
 result = fire_anchor_killer_combo(game_filter=None, target='$TARGET', label='${GAME}_${i}')
 print('SUCCESS' if result else 'FAILED')
-" 2>&1 | grep -E "PLACED|REJECTED|Best combo|true_cost|payout|SUCCESS|FAILED|yes_bid" | tee -a $LOG
+" 2>&1 | grep -E "PLACED|REJECTED|combo|payout|SUCCESS|FAILED|yes_bid|Pool|Trial|Watcher|Balance|Injury|Kelly|no yes_c|yes_c>0|Accepting|below" | tee -a $LOG
 
         echo "$FIRE_KEY" >> $FIRED_LOG
         sleep 5
