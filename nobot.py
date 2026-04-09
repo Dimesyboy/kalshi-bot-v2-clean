@@ -689,20 +689,33 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
         import unicodedata
         return unicodedata.normalize('NFKD', s).encode('ascii','ignore').decode().lower()
 
-    # Load Kalshi-derived hit rates (higher priority — real game results)
-    kalshi_hr_conn = sqlite3.connect('/root/kalshi-bot-v2/data/cache.db')
-    kalshi_hr_rows = kalshi_hr_conn.execute(
+    # Load pre-computed killer legs (highest priority — real edge data)
+    killer_conn = sqlite3.connect('/root/kalshi-bot-v2/data/cache.db')
+    killer_rows = killer_conn.execute(
+        'SELECT player_uuid, series, threshold, hit_rate, no_edge FROM killer_legs'
+    ).fetchall()
+    kalshi_hr_rows = killer_conn.execute(
         'SELECT player_uuid, series, threshold, hit_rate, games FROM kalshi_hit_rates'
     ).fetchall()
-    kalshi_hr_conn.close()
-    kalshi_hr = {(r[0], r[1], r[2]): (r[3], r[4]) for r in kalshi_hr_rows}
-    log.info(f'Kalshi hit rates loaded: {len(kalshi_hr)} records')
+    killer_conn.close()
+    killer_map = {(r[0], r[1], r[2]): (r[3], r[4]) for r in killer_rows}
+    kalshi_hr  = {(r[0], r[1], r[2]): (r[3], r[4]) for r in kalshi_hr_rows}
+    log.info(f'Killer legs loaded: {len(killer_map)} | Kalshi hit rates: {len(kalshi_hr)}')
 
     def get_hit_rate(player, thresh, stat, player_uuid=''):
-        # Priority 1: Kalshi-derived hit rates (real results)
         series_map = {'pts':'KXNBAPTS','reb':'KXNBAREB','ast':'KXNBAAST',
                       'threes':'KXNBA3PT','stl':'KXNBASTL','blk':'KXNBABLK'}
         series = series_map.get(stat,'')
+
+        # Priority 1: pre-computed killer legs (real edge, most reliable)
+        if player_uuid and series:
+            key = (player_uuid, series, float(thresh))
+            if key in killer_map:
+                hr, edge = killer_map[key]
+                log.debug(f'Killer map: {player} {thresh}+ = {hr:.2f} edge={edge:+.3f}')
+                return hr
+
+        # Priority 2: Kalshi-derived hit rates
         if player_uuid and series:
             key = (player_uuid, series, float(thresh))
             if key in kalshi_hr:
@@ -793,8 +806,16 @@ def fire_anchor_killer_combo(game_filter=None, target=None, label='', max_legs=1
                     hit_rate = max(0.0, hit_rate + inj_impact)
                     log.info(f'  {player} injury adjusted hit_rate → {hit_rate:.2f}')
 
-                no_edge  = yb - (hit_rate or yb)
-                role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
+                # Use pre-computed no_edge from killer_map if available
+                series_key = {'pts':'KXNBAPTS','reb':'KXNBAREB','ast':'KXNBAAST',
+                              'threes':'KXNBA3PT','stl':'KXNBASTL','blk':'KXNBABLK'}.get(stat,'')
+                k_key = (p_uuid, series_key, float(thresh))
+                if k_key in killer_map:
+                    hit_rate, no_edge = killer_map[k_key]
+                    role = 'KILLER'
+                else:
+                    no_edge = yb - (hit_rate or yb)
+                    role = 'ANCHOR' if yb >= 0.82 else ('KILLER' if (hit_rate and no_edge >= 0.05) else 'NEUTRAL')
 
                 # Watcher boost — if orderbook sees smart money or OI growth, upgrade role
                 ws = watcher_signals.get(m['ticker'])

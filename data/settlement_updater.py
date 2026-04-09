@@ -42,7 +42,7 @@ def fetch_settled_markets(days_back=2):
 
     for series in SERIES:
         cursor = None
-        for _ in range(5):
+        for _ in range(50):  # fetch all pages
             params = {'series_ticker': series, 'status': 'settled', 'limit': 200}
             if cursor: params['cursor'] = cursor
             try:
@@ -57,7 +57,7 @@ def fetch_settled_markets(days_back=2):
                           and m.get('result') in ('yes','no')]
                 all_markets.extend(recent)
                 cursor = data.get('cursor','')
-                if not cursor or len(recent) < len(mkts): break
+                if not cursor or not mkts: break
                 time.sleep(0.3)
             except Exception as e:
                 log.warning(f'{series} fetch error: {e}')
@@ -185,12 +185,13 @@ def get_kalshi_hit_rate(player_uuid, series, threshold):
 
 
 def run_update(days_back=2):
-    """Main entry point — fetch and store."""
+    """Main entry point — fetch, store, rebuild killers."""
     markets = fetch_settled_markets(days_back)
+    inserted = 0
     if markets:
         inserted = update_hit_rates(markets)
-        return inserted
-    return 0
+    rebuild_killer_legs()
+    return inserted
 
 
 if __name__ == '__main__':
@@ -215,3 +216,36 @@ if __name__ == '__main__':
     print('-'*65)
     for r in rows:
         print(f'{r[0]:25} {r[1]:12} {r[2]:7.1f} {r[3]:6} {r[4]:5} {r[5]:.1%}')
+
+
+def rebuild_killer_legs():
+    """Rebuild killer_legs table from hit rates + orderbook data."""
+    import sqlite3
+    conn_ob = sqlite3.connect('/root/kalshi-bot-v2/data/orderbook.db')
+    conn_ob.execute(f"ATTACH DATABASE '{DB}' AS cache")
+    conn_ob.execute('DROP TABLE IF EXISTS cache.killer_legs')
+    conn_ob.execute('''
+        CREATE TABLE cache.killer_legs (
+            player_uuid TEXT, player_name TEXT, series TEXT,
+            threshold REAL, games INTEGER, hit_rate REAL,
+            mm_yes_bid REAL, no_edge REAL, updated_at TEXT,
+            PRIMARY KEY (player_uuid, series, threshold)
+        )
+    ''')
+    conn_ob.execute('''
+        INSERT OR REPLACE INTO cache.killer_legs
+        SELECT h.player_uuid, h.player_name, h.series, h.threshold,
+               h.games, h.hit_rate, AVG(m.yes_bid),
+               ROUND(AVG(m.yes_bid) - h.hit_rate, 4), datetime('now')
+        FROM cache.kalshi_hit_rates h
+        JOIN market_snapshots m ON m.player_uuid = h.player_uuid
+            AND m.yes_bid > 0.01 AND m.minutes_to_tip BETWEEN 30 AND 90
+        WHERE h.games >= 5
+        GROUP BY h.player_uuid, h.series, h.threshold
+        HAVING AVG(m.yes_bid) - h.hit_rate > 0.03
+    ''')
+    count = conn_ob.execute('SELECT COUNT(*) FROM cache.killer_legs').fetchone()[0]
+    conn_ob.commit()
+    conn_ob.close()
+    log.info(f'Rebuilt killer_legs: {count} records')
+    return count
